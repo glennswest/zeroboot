@@ -1,0 +1,88 @@
+//! stormcos-install — the Storm CoreOS installer (our `openshift-install`).
+//!
+//! Consumes a stormcos release artifact and produces something that boots and
+//! becomes a cluster. Phase 1 is `boot-image`: lay a bootable GPT disk with an
+//! ESP (systemd-boot + kernel + initramfs) and the stormblock slab payload,
+//! written in pure Rust straight into the image file — no root, no loop
+//! devices, no external partitioning/format tooling.
+
+mod bootimage;
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "stormcos-install", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Build a bootable disk image: ESP (systemd-boot + kernel + initramfs)
+    /// plus the stormblock slab payload.
+    BootImage {
+        /// Kernel image (vmlinuz) for the pinned release kernel.
+        #[arg(long)]
+        kernel: PathBuf,
+        /// Initramfs carrying the stormblock client + boot handoff.
+        #[arg(long)]
+        initramfs: PathBuf,
+        /// EFI bootloader binary (systemd-bootx64.efi).
+        #[arg(long)]
+        bootloader: PathBuf,
+        /// stormblock slab holding the release volumes (root.slab).
+        #[arg(long)]
+        slab: PathBuf,
+        /// Boot volume to export as root, by name or UUID (e.g. boot-cp-01).
+        #[arg(long)]
+        volume: String,
+        /// ESP size in MiB.
+        #[arg(long, default_value = "256")]
+        esp_mib: u64,
+        /// Guest device the disk appears as; the slab partition becomes
+        /// <disk>2 on the kernel cmdline.
+        #[arg(long, default_value = "/dev/vda")]
+        disk_device: String,
+        /// Extra kernel cmdline arguments.
+        #[arg(long)]
+        cmdline: Option<String>,
+        /// Output image path.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_target(false).init();
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::BootImage {
+            kernel,
+            initramfs,
+            bootloader,
+            slab,
+            volume,
+            esp_mib,
+            disk_device,
+            cmdline,
+            out,
+        } => {
+            let report = bootimage::build(&bootimage::BootImageSpec {
+                kernel,
+                initramfs,
+                bootloader,
+                slab,
+                volume,
+                esp_mib,
+                disk_device,
+                extra_cmdline: cmdline,
+                out,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+    }
+}
