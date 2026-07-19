@@ -116,6 +116,18 @@ pub fn build(spec: &BootImageSpec) -> anyhow::Result<BootImageReport> {
         offsets
     };
 
+    // Protective MBR at LBA0. `GptConfig::create` does not write one, and
+    // without it firmware and partition tools don't recognise the disk as
+    // partitioned at all — it reads as raw data.
+    {
+        let mut img = OpenOptions::new().read(true).write(true).open(&spec.out)?;
+        let last_lba = u32::try_from((total / LB_SIZE) - 1).unwrap_or(u32::MAX);
+        gpt::mbr::ProtectiveMBR::with_lb_size(last_lba)
+            .overwrite_lba0(&mut img)
+            .map_err(|e| anyhow::anyhow!("write protective MBR: {e}"))?;
+        img.flush()?;
+    }
+
     // --- ESP: FAT32 + systemd-boot + kernel + initramfs ---------------------
     let cmdline = build_cmdline(spec);
     {
@@ -318,6 +330,24 @@ mod tests {
         let mut got = vec![0u8; payload.len()];
         img.read_exact(&mut got).unwrap();
         assert_eq!(got, payload, "slab must land byte-for-byte");
+    }
+
+    #[test]
+    fn writes_protective_mbr_at_lba0() {
+        // Without this, firmware and partition tools see raw data, not a
+        // partitioned disk — `file` reports "data" and nothing boots.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = spec_in(tmp.path());
+        build(&spec).unwrap();
+
+        let mut lba0 = [0u8; 512];
+        File::open(&spec.out)
+            .unwrap()
+            .read_exact(&mut lba0)
+            .unwrap();
+        assert_eq!(&lba0[510..512], &[0x55, 0xAA], "MBR boot signature");
+        // First partition entry (offset 446) must be type 0xEE (GPT protective).
+        assert_eq!(lba0[446 + 4], 0xEE, "protective partition type");
     }
 
     #[test]
