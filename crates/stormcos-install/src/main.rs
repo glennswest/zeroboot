@@ -6,7 +6,7 @@
 //! written in pure Rust straight into the image file — no root, no loop
 //! devices, no external partitioning/format tooling.
 
-mod bootimage;
+use stormcos_install::bootimage;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
