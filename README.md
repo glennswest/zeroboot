@@ -44,6 +44,36 @@ Written in **pure Rust** (`gpt` + `fatfs`) directly into the image file — no
 root, no loop devices, no external partitioning/format tooling — so it builds
 on any host, including macOS and CI.
 
+### Overlay root (immutable OS, writable where it counts)
+
+The erofs root is read-only, but a running node must write (sshd host keys,
+systemd-logind, kubelet state). The initramfs composes the OpenShift/RHCOS
+shape: a **read-only erofs lower + a writable upper** (overlayfs). Upper is
+tmpfs today (ephemeral); a persistent per-machine stormblock volume is the
+follow-on. `scripts/stormcos-initramfs.sh` adds this plus the RHEL10 runtime
+fixes below to a stormblock initramfs.
+
+### Proven boot (2026-07-19)
+
+A stormcos node boots end to end on Proxmox (real hardware, no nesting):
+UEFI → systemd-boot → Rocky 6.12 → initramfs → `stormblock boot-local` → ublk
+root → overlay(erofs) → `switch_root` → **systemd multi-user.target with
+kubelet, kube-proxy, cadvisor, sshd, systemd-logind all started, zero
+failures**. Four fixes were required, each a real live-boot failure first:
+
+1. boot-image must write a **protective MBR** (else the disk reads as raw data).
+2. `gpt` alignment is in **LBAs, not bytes**.
+3. initramfs needs **virtio_scsi / sd_mod / erofs / overlay decompressed**
+   (they're modules on RHEL10; busybox has no xzcat).
+4. **`kernel.io_uring_disabled=2`** on RHEL10 — ublk needs it re-enabled.
+
+Proxmox-specific: the VM must be **UEFI (OVMF)**, and the module attaches the
+disk as **scsi0 → /dev/sda**, so build with `--disk-device /dev/sda`.
+
+Open upstream: per-machine COW snapshot boot needs stormblock to persist
+extent maps (stormblock#13) — until then boot the template volume.
+
 ## Status
 
-Early. `boot-image` first; infra provisioning and bootstrap follow.
+Early. `boot-image` works and boots a real node. Next: persistent writable
+state (stormblock /var volume), infra provisioning, cluster bootstrap.
