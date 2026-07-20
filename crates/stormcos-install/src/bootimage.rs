@@ -35,6 +35,15 @@ const LB_SIZE: u64 = 512;
 /// 1 MiB / 512 = 2048, the conventional alignment.
 const ALIGN_LBA: u64 = MIB / LB_SIZE;
 
+/// A writable per-node thin volume the initramfs exports and systemd mounts.
+/// Not a disk partition: it lives inside the stormblock slab as a thin volume,
+/// so it grows its backing independently and auto-expands on pressure. The
+/// `volume` name matches an entry in the slab's volumes.dat.
+pub struct WritableMount {
+    pub volume: String,
+    pub mount: String,
+}
+
 pub struct BootImageSpec {
     pub kernel: PathBuf,
     pub initramfs: PathBuf,
@@ -42,13 +51,9 @@ pub struct BootImageSpec {
     pub slab: PathBuf,
     pub volume: String,
     pub esp_mib: u64,
-    /// Writable /var partition size (MiB); 0 = none. Formatted xfs + mounted
-    /// on first boot via systemd-makefs (PARTLABEL=var).
-    pub var_mib: u64,
-    /// Writable /var/lib/containers partition size (MiB); 0 = none
-    /// (PARTLABEL=containers). Separate from /var so CRI-O's containers-storage
-    /// has its own space + can auto-expand independently.
-    pub containers_mib: u64,
+    /// Writable thin volumes (var, containers) to export + mount at boot.
+    /// Passed to the initramfs via rd.stormblock.writable; empty = none.
+    pub writable: Vec<WritableMount>,
     pub disk_device: String,
     pub extra_cmdline: Option<String>,
     pub out: PathBuf,
@@ -85,9 +90,10 @@ pub fn build(spec: &BootImageSpec) -> anyhow::Result<BootImageReport> {
     let esp_bytes = spec.esp_mib * MIB;
     let slab_bytes = std::fs::metadata(&spec.slab)?.len();
     let slab_aligned = slab_bytes.div_ceil(MIB) * MIB;
-    let var_bytes = spec.var_mib * MIB;
-    let containers_bytes = spec.containers_mib * MIB;
-    let total = RESERVE + esp_bytes + slab_aligned + var_bytes + containers_bytes + RESERVE;
+    // Writable /var + /var/lib/containers are thin volumes INSIDE the slab, not
+    // disk partitions — the slab already carries their (sparse) backing, so the
+    // disk is just ESP + slab.
+    let total = RESERVE + esp_bytes + slab_aligned + RESERVE;
 
     // Sparse file of the full size; GPT + FAT are written into it in place.
     if let Some(parent) = spec.out.parent() {
@@ -114,23 +120,6 @@ pub fn build(spec: &BootImageSpec) -> anyhow::Result<BootImageReport> {
                 Some(ALIGN_LBA),
             )
             .map_err(|e| anyhow::anyhow!("add slab partition: {e}"))?;
-        // Writable, empty; formatted xfs + mounted on first boot by the base
-        // (PARTLABEL=var / =containers). Kept empty here so the image stays
-        // sparse; auto-expand grows them into free disk later.
-        if var_bytes > 0 {
-            disk.add_partition("var", var_bytes, partition_types::LINUX_FS, 0, Some(ALIGN_LBA))
-                .map_err(|e| anyhow::anyhow!("add var partition: {e}"))?;
-        }
-        if containers_bytes > 0 {
-            disk.add_partition(
-                "containers",
-                containers_bytes,
-                partition_types::LINUX_FS,
-                0,
-                Some(ALIGN_LBA),
-            )
-            .map_err(|e| anyhow::anyhow!("add containers partition: {e}"))?;
-        }
 
         let parts = disk.partitions().clone();
         let esp = parts.get(&esp_id).expect("ESP partition recorded");
@@ -222,6 +211,19 @@ fn build_cmdline(spec: &BootImageSpec) -> String {
          rd.stormblock.meta=/etc/stormblock/meta stormblock.volume={}",
         spec.disk_device, spec.volume
     );
+    // Writable thin volumes: name:mount pairs, comma-separated. The initramfs
+    // passes each to `boot-local --writable`, then appends an fstab entry so
+    // systemd formats (x-systemd.makefs) and mounts the ublk device over the
+    // read-only root.
+    if !spec.writable.is_empty() {
+        let list = spec
+            .writable
+            .iter()
+            .map(|w| format!("{}:{}", w.volume, w.mount))
+            .collect::<Vec<_>>()
+            .join(",");
+        c.push_str(&format!(" rd.stormblock.writable={list}"));
+    }
     if let Some(extra) = &spec.extra_cmdline {
         c.push(' ');
         c.push_str(extra);
@@ -260,8 +262,7 @@ mod tests {
             slab: fake(dir, "root.slab", 3 * 1024 * 1024),
             volume: "boot-cp-01".into(),
             esp_mib: 64,
-            var_mib: 0,
-            containers_mib: 0,
+            writable: Vec::new(),
             disk_device: "/dev/vda".into(),
             extra_cmdline: None,
             out: dir.join("stormcos.img"),

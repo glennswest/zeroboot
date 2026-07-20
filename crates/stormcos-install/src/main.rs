@@ -41,12 +41,10 @@ enum Command {
         /// ESP size in MiB.
         #[arg(long, default_value = "256")]
         esp_mib: u64,
-        /// Writable /var partition size in MiB (0 = none).
-        #[arg(long, default_value = "0")]
-        var_mib: u64,
-        /// Writable /var/lib/containers partition size in MiB (0 = none).
-        #[arg(long, default_value = "0")]
-        containers_mib: u64,
+        /// Writable thin volume to export + mount, as volume:mount (e.g.
+        /// var-stormcos-0.1.0:/var). Repeatable; empty = none.
+        #[arg(long = "writable")]
+        writable: Vec<String>,
         /// Guest device the disk appears as; the slab partition becomes
         /// <disk>2 on the kernel cmdline.
         #[arg(long, default_value = "/dev/vda")]
@@ -72,12 +70,23 @@ fn main() -> anyhow::Result<()> {
             slab,
             volume,
             esp_mib,
-            var_mib,
-            containers_mib,
+            writable,
             disk_device,
             cmdline,
             out,
         } => {
+            let writable = writable
+                .iter()
+                .map(|w| {
+                    let (vol, mnt) = w
+                        .split_once(':')
+                        .ok_or_else(|| anyhow::anyhow!("--writable must be volume:mount, got {w}"))?;
+                    Ok(bootimage::WritableMount {
+                        volume: vol.to_string(),
+                        mount: mnt.to_string(),
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let report = bootimage::build(&bootimage::BootImageSpec {
                 kernel,
                 initramfs,
@@ -85,8 +94,7 @@ fn main() -> anyhow::Result<()> {
                 slab,
                 volume,
                 esp_mib,
-                var_mib,
-                containers_mib,
+                writable,
                 disk_device,
                 extra_cmdline: cmdline,
                 out,
