@@ -41,6 +41,12 @@ enum Command {
         /// ESP size in MiB.
         #[arg(long, default_value = "256")]
         esp_mib: u64,
+        /// Writable /var partition size in MiB (0 = none).
+        #[arg(long, default_value = "0")]
+        var_mib: u64,
+        /// Writable /var/lib/containers partition size in MiB (0 = none).
+        #[arg(long, default_value = "0")]
+        containers_mib: u64,
         /// Guest device the disk appears as; the slab partition becomes
         /// <disk>2 on the kernel cmdline.
         #[arg(long, default_value = "/dev/vda")]
@@ -66,6 +72,8 @@ fn main() -> anyhow::Result<()> {
             slab,
             volume,
             esp_mib,
+            var_mib,
+            containers_mib,
             disk_device,
             cmdline,
             out,
@@ -77,6 +85,8 @@ fn main() -> anyhow::Result<()> {
                 slab,
                 volume,
                 esp_mib,
+                var_mib,
+                containers_mib,
                 disk_device,
                 extra_cmdline: cmdline,
                 out,

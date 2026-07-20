@@ -42,6 +42,13 @@ pub struct BootImageSpec {
     pub slab: PathBuf,
     pub volume: String,
     pub esp_mib: u64,
+    /// Writable /var partition size (MiB); 0 = none. Formatted xfs + mounted
+    /// on first boot via systemd-makefs (PARTLABEL=var).
+    pub var_mib: u64,
+    /// Writable /var/lib/containers partition size (MiB); 0 = none
+    /// (PARTLABEL=containers). Separate from /var so CRI-O's containers-storage
+    /// has its own space + can auto-expand independently.
+    pub containers_mib: u64,
     pub disk_device: String,
     pub extra_cmdline: Option<String>,
     pub out: PathBuf,
@@ -78,7 +85,9 @@ pub fn build(spec: &BootImageSpec) -> anyhow::Result<BootImageReport> {
     let esp_bytes = spec.esp_mib * MIB;
     let slab_bytes = std::fs::metadata(&spec.slab)?.len();
     let slab_aligned = slab_bytes.div_ceil(MIB) * MIB;
-    let total = RESERVE + esp_bytes + slab_aligned + RESERVE;
+    let var_bytes = spec.var_mib * MIB;
+    let containers_bytes = spec.containers_mib * MIB;
+    let total = RESERVE + esp_bytes + slab_aligned + var_bytes + containers_bytes + RESERVE;
 
     // Sparse file of the full size; GPT + FAT are written into it in place.
     if let Some(parent) = spec.out.parent() {
@@ -105,6 +114,23 @@ pub fn build(spec: &BootImageSpec) -> anyhow::Result<BootImageReport> {
                 Some(ALIGN_LBA),
             )
             .map_err(|e| anyhow::anyhow!("add slab partition: {e}"))?;
+        // Writable, empty; formatted xfs + mounted on first boot by the base
+        // (PARTLABEL=var / =containers). Kept empty here so the image stays
+        // sparse; auto-expand grows them into free disk later.
+        if var_bytes > 0 {
+            disk.add_partition("var", var_bytes, partition_types::LINUX_FS, 0, Some(ALIGN_LBA))
+                .map_err(|e| anyhow::anyhow!("add var partition: {e}"))?;
+        }
+        if containers_bytes > 0 {
+            disk.add_partition(
+                "containers",
+                containers_bytes,
+                partition_types::LINUX_FS,
+                0,
+                Some(ALIGN_LBA),
+            )
+            .map_err(|e| anyhow::anyhow!("add containers partition: {e}"))?;
+        }
 
         let parts = disk.partitions().clone();
         let esp = parts.get(&esp_id).expect("ESP partition recorded");
@@ -234,6 +260,8 @@ mod tests {
             slab: fake(dir, "root.slab", 3 * 1024 * 1024),
             volume: "boot-cp-01".into(),
             esp_mib: 64,
+            var_mib: 0,
+            containers_mib: 0,
             disk_device: "/dev/vda".into(),
             extra_cmdline: None,
             out: dir.join("stormcos.img"),
