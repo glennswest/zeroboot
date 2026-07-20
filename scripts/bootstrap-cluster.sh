@@ -23,6 +23,20 @@ set -euo pipefail
 NODE_IP="${NODE_IP:?set NODE_IP}"
 NODE_NAME="${NODE_NAME:-stormcos-boot.g8.lo}"
 BIN_DIR="${BIN_DIR:-$HOME/projects}"
+
+# Cluster network (stormcos#13). Set NETOP_DIR to a network-operator checkout to
+# deploy it: it owns the Cilium lifecycle from a Network CR, the way OpenShift's
+# CNO owns OVN-K. Unset => the proven no-CNI bring-up, unchanged.
+#
+# PREREQUISITE: a real CRI. The operator and the Cilium DaemonSets it renders
+# are pods, so `--runtime native` cannot run them — CRI-O must be up first
+# (stormcos#11 / board task #22). Wiring is here so it is one flag away, but
+# expect the pods to stay Pending until the kubelet talks to CRI-O.
+NETOP_DIR="${NETOP_DIR:-}"
+# The Network CR to install (mode/IPAM/routing live here).
+NETWORK_CR="${NETWORK_CR:-}"
+# Cilium provides the CNI, so drop --no-cni when we deploy the operator.
+if [ -n "$NETOP_DIR" ]; then KUBELET_CNI=""; else KUBELET_CNI="--no-cni"; fi
 MT=x86_64-unknown-linux-musl
 SSH="ssh -o StrictHostKeyChecking=no root@$NODE_IP"
 SCP="scp -o StrictHostKeyChecking=no"
@@ -90,7 +104,7 @@ cat > /etc/kubernetes/kube-scheduler <<EOF
 KUBE_SCHEDULER_ARGS=--apiserver http://127.0.0.1:6443 --certificate-authority /etc/kubernetes/pki/ca.crt --client-certificate /etc/kubernetes/pki/scheduler.crt --client-key /etc/kubernetes/pki/scheduler.key
 EOF
 cat > /etc/kubernetes/kubelet <<EOF
-KUBELET_ARGS=--apiserver http://127.0.0.1:6443 --node-name $NODE_NAME --runtime native --no-cni
+KUBELET_ARGS=--apiserver http://127.0.0.1:6443 --node-name $NODE_NAME --runtime native $KUBELET_CNI
 EOF
 chmod +x /usr/bin/{fastetcd,kube-apiserver,kube-controller-manager,kube-scheduler,kubelet,kube-proxy}
 chmod 600 /etc/kubernetes/pki/*.key
@@ -100,6 +114,34 @@ systemctl start kube-apiserver; sleep 5
 systemctl start kube-controller-manager kube-scheduler; sleep 2
 systemctl start kubelet; sleep 6
 echo 'services:' \$(systemctl is-active fastetcd kube-apiserver kube-controller-manager kube-scheduler kubelet | paste -sd' ')"
+
+# --- cluster network: network-operator installs + owns Cilium (stormcos#13) ---
+# The node has no kubectl (immutable image, no package manager), so manifests go
+# in over the apiserver REST API. Order matters: CRD, then RBAC + the operator
+# Deployment, then the Network CR it reconciles.
+if [ -n "$NETOP_DIR" ]; then
+    if [ ! -d "$NETOP_DIR/deploy" ]; then
+        echo "ERROR: NETOP_DIR=$NETOP_DIR has no deploy/ — is that a network-operator checkout?" >&2
+        exit 1
+    fi
+    CR="${NETWORK_CR:-$NETOP_DIR/examples/network-overlay.yaml}"
+    echo "== cluster network: network-operator + Network CR ($(basename "$CR")) =="
+
+    # Wait for the apiserver to actually serve before applying.
+    for i in $(seq 1 30); do
+        $SSH "curl -sf -o /dev/null http://127.0.0.1:6443/api/v1/nodes" && break
+        [ "$i" = 30 ] && { echo "ERROR: apiserver never became ready" >&2; exit 1; }
+        sleep 2
+    done
+
+    $SSH "rm -rf /tmp/netop && mkdir -p /tmp/netop"
+    $SCP -r "$NETOP_DIR/deploy" root@$NODE_IP:/tmp/netop/
+    $SCP "$CR" root@$NODE_IP:/tmp/netop/network-cr.yaml
+    $SCP "$(dirname "$0")/apply-manifests.py" root@$NODE_IP:/tmp/
+    $SSH "python3 /tmp/apply-manifests.py http://127.0.0.1:6443 \
+        /tmp/netop/deploy/crds /tmp/netop/deploy/operator.yaml /tmp/netop/network-cr.yaml"
+    echo "   network status: curl -s http://$NODE_IP:6443/apis/network.storm.io/v1/networks/cluster"
+fi
 
 rm -rf "$S"
 echo "Done. Check: curl -s http://$NODE_IP:6443/api/v1/nodes"
