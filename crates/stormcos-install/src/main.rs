@@ -41,6 +41,11 @@ enum Command {
         /// ESP size in MiB.
         #[arg(long, default_value = "256")]
         esp_mib: u64,
+        /// Preloaded image-store volume to export at boot, by name (e.g.
+        /// image-store-stormcos-0.1.0). Without it the store is never exported
+        /// and CRI-O cannot see any preloaded image.
+        #[arg(long)]
+        image_store: Option<String>,
         /// Writable thin volume to export + mount, as volume:mount (e.g.
         /// var-stormcos-0.1.0:/var). Repeatable; empty = none.
         #[arg(long = "writable")]
@@ -70,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             slab,
             volume,
             esp_mib,
+            image_store,
             writable,
             disk_device,
             cmdline,
@@ -94,6 +100,7 @@ fn main() -> anyhow::Result<()> {
                 slab,
                 volume,
                 esp_mib,
+                image_store,
                 writable,
                 disk_device,
                 extra_cmdline: cmdline,

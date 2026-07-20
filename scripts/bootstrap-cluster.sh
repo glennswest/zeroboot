@@ -24,19 +24,32 @@ NODE_IP="${NODE_IP:?set NODE_IP}"
 NODE_NAME="${NODE_NAME:-stormcos-boot.g8.lo}"
 BIN_DIR="${BIN_DIR:-$HOME/projects}"
 
+# Container runtime. rustkube-node's documented default is CRI-O over gRPC
+# (`--runtime=cri`, CRI v1 on /run/crio/crio.sock) — the same protocol
+# OpenShift uses; `native` (youki) and `vm` are its experimental paths. CRI-O
+# ships in the edition as a systemd unit, so use the real CRI.
+#
+# With CRI-O, *CRI-O* invokes CNI from /etc/cni/net.d (Cilium drops
+# 05-cilium.conflist there) — the kubelet does not, so --no-cni is not wanted.
+RUNTIME="${RUNTIME:-cri}"
+CRI_SOCKET="${CRI_SOCKET:-/run/crio/crio.sock}"
+
 # Cluster network (stormcos#13). Set NETOP_DIR to a network-operator checkout to
 # deploy it: it owns the Cilium lifecycle from a Network CR, the way OpenShift's
-# CNO owns OVN-K. Unset => the proven no-CNI bring-up, unchanged.
-#
-# PREREQUISITE: a real CRI. The operator and the Cilium DaemonSets it renders
-# are pods, so `--runtime native` cannot run them — CRI-O must be up first
-# (stormcos#11 / board task #22). Wiring is here so it is one flag away, but
-# expect the pods to stay Pending until the kubelet talks to CRI-O.
+# CNO owns OVN-K.
 NETOP_DIR="${NETOP_DIR:-}"
 # The Network CR to install (mode/IPAM/routing live here).
 NETWORK_CR="${NETWORK_CR:-}"
-# Cilium provides the CNI, so drop --no-cni when we deploy the operator.
-if [ -n "$NETOP_DIR" ]; then KUBELET_CNI=""; else KUBELET_CNI="--no-cni"; fi
+
+# --no-cni is a dev-only fallback: it puts pods on host networking. It only
+# makes sense on the native runtime with no CNI installed.
+if [ "$RUNTIME" = "cri" ]; then
+    KUBELET_RUNTIME="--runtime cri --cri-socket $CRI_SOCKET"
+elif [ -n "$NETOP_DIR" ]; then
+    KUBELET_RUNTIME="--runtime $RUNTIME"
+else
+    KUBELET_RUNTIME="--runtime $RUNTIME --no-cni"
+fi
 MT=x86_64-unknown-linux-musl
 SSH="ssh -o StrictHostKeyChecking=no root@$NODE_IP"
 SCP="scp -o StrictHostKeyChecking=no"
@@ -104,16 +117,24 @@ cat > /etc/kubernetes/kube-scheduler <<EOF
 KUBE_SCHEDULER_ARGS=--apiserver http://127.0.0.1:6443 --certificate-authority /etc/kubernetes/pki/ca.crt --client-certificate /etc/kubernetes/pki/scheduler.crt --client-key /etc/kubernetes/pki/scheduler.key
 EOF
 cat > /etc/kubernetes/kubelet <<EOF
-KUBELET_ARGS=--apiserver http://127.0.0.1:6443 --node-name $NODE_NAME --runtime native $KUBELET_CNI
+KUBELET_ARGS=--apiserver http://127.0.0.1:6443 --node-name $NODE_NAME $KUBELET_RUNTIME
 EOF
 chmod +x /usr/bin/{fastetcd,kube-apiserver,kube-controller-manager,kube-scheduler,kubelet,kube-proxy}
 chmod 600 /etc/kubernetes/pki/*.key
 systemctl daemon-reload
+# CRI-O first when we're using the CRI runtime: the kubelet dials
+# \$CRI_SOCKET at startup, so the socket has to exist before kubelet starts.
+if [ '$RUNTIME' = cri ]; then
+    systemctl enable --now crio || echo 'WARNING: crio failed to start'
+    for i in \$(seq 1 30); do [ -S '$CRI_SOCKET' ] && break; sleep 1; done
+    [ -S '$CRI_SOCKET' ] || echo 'WARNING: $CRI_SOCKET never appeared — kubelet will fail to reach the CRI'
+    crictl --runtime-endpoint unix://$CRI_SOCKET version 2>/dev/null | head -3 || true
+fi
 systemctl start fastetcd; sleep 3
 systemctl start kube-apiserver; sleep 5
 systemctl start kube-controller-manager kube-scheduler; sleep 2
 systemctl start kubelet; sleep 6
-echo 'services:' \$(systemctl is-active fastetcd kube-apiserver kube-controller-manager kube-scheduler kubelet | paste -sd' ')"
+echo 'services:' \$(systemctl is-active ${RUNTIME_SVC:-crio} fastetcd kube-apiserver kube-controller-manager kube-scheduler kubelet | paste -sd' ')"
 
 # --- cluster network: network-operator installs + owns Cilium (stormcos#13) ---
 # The node has no kubectl (immutable image, no package manager), so manifests go

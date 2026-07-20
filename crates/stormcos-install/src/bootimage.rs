@@ -51,6 +51,12 @@ pub struct BootImageSpec {
     pub slab: PathBuf,
     pub volume: String,
     pub esp_mib: u64,
+    /// Preloaded image-store volume to export at boot, by name.
+    ///
+    /// Without this the store volume sits in the slab but is never exported,
+    /// so CRI-O cannot see ANY preloaded image and a zeroboot node would have
+    /// to pull at runtime — defeating the whole point of preloading.
+    pub image_store: Option<String>,
     /// Writable thin volumes (var, containers) to export + mount at boot.
     /// Passed to the initramfs via rd.stormblock.writable; empty = none.
     pub writable: Vec<WritableMount>,
@@ -215,6 +221,13 @@ fn build_cmdline(spec: &BootImageSpec) -> String {
          rd.stormblock.overlay=tmpfs:1G",
         spec.disk_device, spec.volume
     );
+    // Preloaded image store. Exported as the ublk device right after root, and
+    // mounted read-only so CRI-O/rspacefs can serve the images that were packed
+    // in at build time. Must come before the writable list: the initramfs
+    // assigns ublk indices in this order (root=0, store=1, writable=2..).
+    if let Some(store) = &spec.image_store {
+        c.push_str(&format!(" rd.stormblock.image-store={store}"));
+    }
     // Writable thin volumes: name:mount pairs, comma-separated. The initramfs
     // passes each to `boot-local --writable`, then appends an fstab entry so
     // systemd formats (x-systemd.makefs) and mounts the ublk device over the
@@ -266,6 +279,7 @@ mod tests {
             slab: fake(dir, "root.slab", 3 * 1024 * 1024),
             volume: "boot-cp-01".into(),
             esp_mib: 64,
+            image_store: None,
             writable: Vec::new(),
             disk_device: "/dev/vda".into(),
             extra_cmdline: None,
