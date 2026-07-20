@@ -206,9 +206,13 @@ pub fn build(spec: &BootImageSpec) -> anyhow::Result<BootImageReport> {
 }
 
 fn build_cmdline(spec: &BootImageSpec) -> String {
+    // Overlay root is always on: stormcos is an immutable OS (read-only erofs
+    // lower + writable tmpfs upper), the RHCOS/OpenShift shape. /var and
+    // /var/lib/containers are persistent thin volumes mounted over it (below).
     let mut c = format!(
         "console=ttyS0 root=/dev/ublkb0 rd.stormblock.slab={}2 \
-         rd.stormblock.meta=/etc/stormblock/meta stormblock.volume={}",
+         rd.stormblock.meta=/etc/stormblock/meta stormblock.volume={} \
+         rd.stormblock.overlay=tmpfs:1G",
         spec.disk_device, spec.volume
     );
     // Writable thin volumes: name:mount pairs, comma-separated. The initramfs
