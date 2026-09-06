@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/stormcos-install"]
+members = ["crates/zeroboot"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/glennswest/stormcos-installer"
+repository = "https://github.com/glennswest/zeroboot"
 
 [workspace.dependencies]
 anyhow = "1"

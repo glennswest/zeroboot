@@ -1,5 +1,5 @@
 [package]
-name = "stormcos-install"
+name = "zeroboot"
 description = "Storm CoreOS installer: boot artifacts, infrastructure, cluster bootstrap"
 version.workspace = true
 edition.workspace = true

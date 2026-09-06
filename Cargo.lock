@@ -522,22 +522,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
-name = "stormcos-install"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fatfs",
- "fscommon",
- "gpt",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -784,6 +768,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "zeroboot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fatfs",
+ "fscommon",
+ "gpt",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

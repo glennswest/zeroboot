@@ -1,4 +1,7 @@
-//! stormcos-install — the Storm CoreOS installer (our `openshift-install`).
+//! zeroboot — a node is functional the moment it boots.
+//!
+//! Not an installer. Nothing here "installs" a machine and then hands it over
+//! working; it boots, looks at its drives, and takes one if it is nobody's.
 //!
 //! Consumes a stormcos release artifact and produces something that boots and
 //! becomes a cluster. Phase 1 is `boot-image`: lay a bootable GPT disk with an
@@ -6,13 +9,13 @@
 //! written in pure Rust straight into the image file — no root, no loop
 //! devices, no external partitioning/format tooling.
 
-use stormcos_install::bootimage;
+use zeroboot::bootimage;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "stormcos-install", version, about)]
+#[command(name = "zeroboot", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

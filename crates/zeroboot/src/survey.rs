@@ -1,0 +1,241 @@
+//! What is on this machine's drives, and whose it is.
+//!
+//! This is the whole of zeroboot's judgement. Taking a drive over is easy —
+//! it is a format. Deciding that a drive is *nobody's* is the part that can
+//! destroy someone's data if it is wrong, so it is written to be read: every
+//! verdict names the evidence it rests on, and anything unrecognised is
+//! [`Verdict::Foreign`], never "probably free".
+//!
+//! Deliberately read-only. Nothing here writes a byte; `survey` produces a
+//! report and the caller decides.
+
+use std::fmt;
+
+/// What a drive turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// A stormblock slab this node already owns. Nothing to do — this is a
+    /// node that has already assimilated and is booting again.
+    Mine { slab_id: String, role: String },
+    /// A stormblock slab belonging to a different node. Never taken: two
+    /// nodes writing one slab is how you lose both.
+    AnotherNode { slab_id: String, owner: String },
+    /// Something is on it that is not ours — a partition table, a filesystem,
+    /// a signature we do not recognise. Left alone.
+    Foreign { what: String },
+    /// Nothing recognisable. Available to take.
+    Blank,
+    /// Could not be read well enough to judge. Treated as foreign: a drive
+    /// that will not answer is not a drive to format.
+    Unreadable { why: String },
+}
+
+impl Verdict {
+    /// Whether zeroboot may format this drive.
+    ///
+    /// Only [`Verdict::Blank`]. Not "not mine", not "unreadable", not
+    /// "foreign but it looked empty" — the one case where the evidence says
+    /// there is nothing to lose.
+    pub fn is_available(&self) -> bool {
+        matches!(self, Verdict::Blank)
+    }
+
+    /// Whether this node is already set up here.
+    pub fn is_mine(&self) -> bool {
+        matches!(self, Verdict::Mine { .. })
+    }
+}
+
+impl fmt::Display for Verdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Verdict::Mine { slab_id, role } => {
+                write!(f, "mine - stormblock slab {slab_id} ({role})")
+            }
+            Verdict::AnotherNode { slab_id, owner } => {
+                write!(f, "another node's - slab {slab_id} owned by {owner}")
+            }
+            Verdict::Foreign { what } => write!(f, "not ours - {what}"),
+            Verdict::Blank => write!(f, "blank - available"),
+            Verdict::Unreadable { why } => write!(f, "unreadable - {why}"),
+        }
+    }
+}
+
+/// One drive, judged.
+#[derive(Debug, Clone)]
+pub struct Drive {
+    pub path: String,
+    pub size_bytes: u64,
+    pub rotational: bool,
+    pub verdict: Verdict,
+}
+
+/// Every drive on the machine, and what zeroboot intends to do.
+#[derive(Debug, Clone)]
+pub struct Survey {
+    pub drives: Vec<Drive>,
+}
+
+impl Survey {
+    /// Drives this node already owns.
+    pub fn mine(&self) -> Vec<&Drive> {
+        self.drives.iter().filter(|d| d.verdict.is_mine()).collect()
+    }
+
+    /// Drives that may be taken, largest first — and among equals, solid
+    /// state before spinning, since the writable end is small and hot.
+    pub fn available(&self) -> Vec<&Drive> {
+        let mut v: Vec<&Drive> =
+            self.drives.iter().filter(|d| d.verdict.is_available()).collect();
+        v.sort_by(|a, b| {
+            a.rotational
+                .cmp(&b.rotational)
+                .then(b.size_bytes.cmp(&a.size_bytes))
+        });
+        v
+    }
+
+    /// Is there anything to do, and may it be done?
+    ///
+    /// The three answers a caller acts on, and nothing in between: a node that
+    /// is already set up boots; a node with somewhere to go takes it; a node
+    /// with nowhere to go boots anyway on whatever the appliance is serving,
+    /// because assimilation is an improvement, not a precondition.
+    pub fn intent(&self) -> Intent {
+        if !self.mine().is_empty() {
+            return Intent::AlreadyMine;
+        }
+        match self.available().first() {
+            Some(d) => Intent::TakeOver { path: d.path.clone() },
+            None => Intent::NothingToTake {
+                because: self
+                    .drives
+                    .iter()
+                    .map(|d| format!("{} {}", d.path, d.verdict))
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// What the survey concluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intent {
+    /// This node has already assimilated. Boot.
+    AlreadyMine,
+    /// Nothing here is anyone's. Take it.
+    TakeOver { path: String },
+    /// Nowhere to go. Boot on the appliance's clone and say why — a node that
+    /// silently declines to assimilate looks identical to one that tried and
+    /// failed.
+    NothingToTake { because: Vec<String> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drive(path: &str, size: u64, rotational: bool, verdict: Verdict) -> Drive {
+        Drive { path: path.into(), size_bytes: size, rotational, verdict }
+    }
+
+    #[test]
+    fn only_a_blank_drive_may_be_taken() {
+        assert!(Verdict::Blank.is_available());
+        assert!(!Verdict::Foreign { what: "GPT with 4 partitions".into() }.is_available());
+        assert!(!Verdict::Unreadable { why: "no medium".into() }.is_available());
+        assert!(!Verdict::AnotherNode {
+            slab_id: "abc".into(),
+            owner: "node-2".into()
+        }
+        .is_available());
+        assert!(!Verdict::Mine { slab_id: "abc".into(), role: "data".into() }.is_available());
+    }
+
+    /// The R230 that prompted this: a 2 TB disk carrying four partitions from
+    /// a previous life. It is not blank and it is not ours, and the only safe
+    /// reading of that is "leave it".
+    #[test]
+    fn a_disk_with_someone_elses_partitions_is_never_taken() {
+        let s = Survey {
+            drives: vec![drive(
+                "/dev/sda",
+                2_000_398_934_016,
+                true,
+                Verdict::Foreign { what: "GPT, 4 partitions".into() },
+            )],
+        };
+        assert!(s.available().is_empty());
+        assert!(matches!(s.intent(), Intent::NothingToTake { .. }));
+    }
+
+    /// An empty removable drive answers ENOMEDIUM, and that is not an
+    /// invitation. Same lesson as the slab probe: absence of a known error is
+    /// not evidence of emptiness.
+    #[test]
+    fn an_unreadable_drive_is_not_treated_as_empty() {
+        let s = Survey {
+            drives: vec![drive(
+                "/dev/sda",
+                0,
+                false,
+                Verdict::Unreadable { why: "no medium found (os error 123)".into() },
+            )],
+        };
+        assert!(s.available().is_empty());
+    }
+
+    #[test]
+    fn a_node_that_already_owns_a_slab_just_boots() {
+        let s = Survey {
+            drives: vec![
+                drive("/dev/sda", 1 << 40, true, Verdict::Mine {
+                    slab_id: "7661cf8b".into(),
+                    role: "data".into(),
+                }),
+                drive("/dev/sdb", 1 << 40, false, Verdict::Blank),
+            ],
+        };
+        assert_eq!(s.intent(), Intent::AlreadyMine, "owning a slab settles it");
+    }
+
+    #[test]
+    fn solid_state_is_preferred_and_then_the_larger_drive() {
+        let s = Survey {
+            drives: vec![
+                drive("/dev/sda", 4 << 40, true, Verdict::Blank),
+                drive("/dev/sdb", 1 << 40, false, Verdict::Blank),
+                drive("/dev/sdc", 2 << 40, false, Verdict::Blank),
+            ],
+        };
+        let order: Vec<&str> = s.available().iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(order, vec!["/dev/sdc", "/dev/sdb", "/dev/sda"]);
+        assert_eq!(s.intent(), Intent::TakeOver { path: "/dev/sdc".into() });
+    }
+
+    /// Nowhere to go is not a failure. The node still boots on what the
+    /// appliance is serving — but it says which drives it looked at and what
+    /// each one was, because "did not assimilate" and "could not" look the
+    /// same from outside.
+    #[test]
+    fn nowhere_to_go_still_reports_what_it_saw() {
+        let s = Survey {
+            drives: vec![
+                drive("/dev/sda", 1 << 40, true, Verdict::Foreign { what: "ext4".into() }),
+                drive("/dev/sdb", 1 << 40, true, Verdict::AnotherNode {
+                    slab_id: "aaaa".into(),
+                    owner: "node-7".into(),
+                }),
+            ],
+        };
+        match s.intent() {
+            Intent::NothingToTake { because } => {
+                assert_eq!(because.len(), 2);
+                assert!(because[0].contains("/dev/sda"), "{because:?}");
+                assert!(because[1].contains("node-7"), "{because:?}");
+            }
+            other => panic!("expected NothingToTake, got {other:?}"),
+        }
+    }
+}

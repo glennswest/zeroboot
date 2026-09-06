@@ -1,79 +1,66 @@
-# stormcos-installer
+# zeroboot
 
-**The Storm CoreOS installer — our `openshift-install`.** Takes a stormcos
-release artifact and turns it into something that boots and becomes a cluster:
-boot media, infrastructure, and cluster bootstrap.
+**A node is functional the moment it boots.** Not an installer — there is no
+step where a machine is installed and *then* becomes useful.
 
-Governing principle (inherited from stormcos): **OpenShift shape always wins.**
-This project is deliberately the analog of `openshift/installer` — same job,
-same phases, storm-native implementations underneath.
+It boots, looks at its drives, and if any of them are nobody's it takes one and
+puts its writable state there. A node with nowhere to put that state still
+boots, on whatever the appliance is serving. Assimilation is an improvement,
+not a precondition.
 
-| openshift-install | stormcos-install |
-|---|---|
-| `create image` / coreos-installer (RHCOS ISO, PXE) | `boot-image` — bootable disk/ISO carrying kernel + initramfs + the **stormblock slab payload** |
-| `install-config.yaml` | the stormcos **TOML manifest** + CloudID metadata |
-| Terraform/CAPI infra provisioning | Proxmox provisioning via the shared terragrunt modules |
-| bootstrap node → control-plane static pods → pivot | bootstrap → rustkube static pods on kubelet → destroy bootstrap |
+## Why it runs in the initramfs
 
-## Why a separate repo
+The writable volumes a stormcos node mounts — `stormcos-state`,
+`stormcert-data`, `fastetcd-data` and the rest — are copy-on-write clones
+served from the appliance over NVMe/TCP until they are local. They are
+writable, and they are not durable: a fresh clone is minted on every boot, so
+nothing written survives.
 
-`stormcos` builds the **image** (compose → image-store → release volume). The
-installer *consumes* that artifact to produce boot media and stand up a
-cluster. OpenShift keeps the same split (`openshift/os` vs
-`openshift/installer`), and the installer grows infra providers and bootstrap
-logic that have no business inside an image composer.
+`stormcos-state` makes it concrete. PID 1 reads `/state/config/stormcos.toml`
+for the hostname, and that hostname is the node CA's subject CN — so a node
+whose state is remote and ephemeral cannot keep its own identity across a
+reboot.
 
-## Boot artifact model
-
-A stormcos node boots: **kernel + initramfs + a stormblock release volume**.
-The initramfs runs `stormblock boot-local`, which attaches the slab, exports
-the per-machine COW snapshot as `/dev/ublkb0`, and `switch_root`s into the
-erofs root. Install is not a copy step — it's a background RAID1 flow-over
-(`--local-disk`) while the node already runs.
-
-So `boot-image` lays out:
+Leave assimilation until after `switch_root` and every one of those volumes has
+to be migrated, or staged in a ramdisk and moved later, with a window where the
+node's own identity exists only in RAM. Running in the initramfs, before
+anything has written a byte, costs a few seconds and removes both.
 
 ```
-GPT disk
-  p1  ESP (FAT32)   systemd-boot + vmlinuz + initramfs + loader entry
-                    options: rd.stormblock.slab=<p2> stormblock.volume=<name>
-  p2  raw           the stormblock slab (root + image-store volumes)
+boot ─► look at the drives ─► take one, if it is nobody's ─► format ─►
+        create the writable volumes there ─► switch_root
 ```
 
-Written in **pure Rust** (`gpt` + `fatfs`) directly into the image file — no
-root, no loop devices, no external partitioning/format tooling — so it builds
-on any host, including macOS and CI.
+## Looking comes before taking
 
-### Overlay root (immutable OS, writable where it counts)
+Taking a drive over is easy; it is a format. Deciding a drive is *nobody's* is
+the part that destroys data when it is wrong, so `survey` is written to be
+read. Every verdict names its evidence, and anything unrecognised is `Foreign`
+— never "probably free":
 
-The erofs root is read-only, but a running node must write (sshd host keys,
-systemd-logind, kubelet state). The initramfs composes the OpenShift/RHCOS
-shape: a **read-only erofs lower + a writable upper** (overlayfs). Upper is
-tmpfs today (ephemeral); a persistent per-machine stormblock volume is the
-follow-on. `scripts/stormcos-initramfs.sh` adds this plus the RHEL10 runtime
-fixes below to a stormblock initramfs.
+| verdict | meaning | taken? |
+|---|---|---|
+| `Mine` | a stormblock slab this node owns | no — already done |
+| `AnotherNode` | a slab belonging to someone else | never |
+| `Foreign` | a table, a filesystem, a signature we do not know | never |
+| `Unreadable` | would not answer | never |
+| `Blank` | nothing recognisable | **yes** |
 
-### Proven boot (2026-07-19)
+Two lessons are baked into that table, both learned on a Dell R230. Its
+`/dev/sda` is a 2 TB disk carrying four partitions from a previous life — not
+blank, not ours, leave it. And on some boots `/dev/sda` is instead the iDRAC
+virtual floppy, which answers `ENOMEDIUM`: absence of a known error is not
+evidence of emptiness.
 
-A stormcos node boots end to end on Proxmox (real hardware, no nesting):
-UEFI → systemd-boot → Rocky 6.12 → initramfs → `stormblock boot-local` → ublk
-root → overlay(erofs) → `switch_root` → **systemd multi-user.target with
-kubelet, kube-proxy, cadvisor, sshd, systemd-logind all started, zero
-failures**. Four fixes were required, each a real live-boot failure first:
+## Two images
 
-1. boot-image must write a **protective MBR** (else the disk reads as raw data).
-2. `gpt` alignment is in **LBAs, not bytes**.
-3. initramfs needs **virtio_scsi / sd_mod / erofs / overlay decompressed**
-   (they're modules on RHEL10; busybox has no xzcat).
-4. **`kernel.io_uring_disabled=2`** on RHEL10 — ublk needs it re-enabled.
+- **boot** — netboot, or an attached drive
+- **ISO** — the same content as virtual media, for a machine that has nothing
+  else
 
-Proxmox-specific: the VM must be **UEFI (OVMF)**, and the module attaches the
-disk as **scsi0 → /dev/sda**, so build with `--disk-device /dev/sda`.
-
-Open upstream: per-machine COW snapshot boot needs stormblock to persist
-extent maps (stormblock#13) — until then boot the template volume.
+Both carry the same zeroboot; only how they arrive differs.
 
 ## Status
 
-Early. `boot-image` works and boots a real node. Next: persistent writable
-state (stormblock /var volume), infra provisioning, cluster bootstrap.
+`survey` — the judgement — is implemented and tested. Format and volume
+creation are next; see issue #2 for the design.
