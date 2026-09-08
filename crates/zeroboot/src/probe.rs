@@ -288,10 +288,10 @@ fn partitions(sys: &Path, name: &str) -> Vec<String> {
 /// `None` means local — this chassis, this node, nobody else's reach.
 fn remote_transport(sys: &Path) -> Option<String> {
     // NVMe states it outright.
-    if let Some(t) = read_trimmed(sys.join("device/transport")).filter(|t| !t.is_empty()) {
-        if t != "pcie" {
-            return Some(format!("nvme-{t}"));
-        }
+    if let Some(t) = read_trimmed(sys.join("device/transport"))
+        .filter(|t| !t.is_empty() && t != "pcie")
+    {
+        return Some(format!("nvme-{t}"));
     }
     // Everything else states it in where the device hangs in the device tree.
     let link = fs::read_link(sys).ok()?.to_string_lossy().into_owned();
