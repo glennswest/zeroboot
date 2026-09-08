@@ -218,7 +218,11 @@ fn judge(
         };
         return match &remote {
             Some(via) => Verdict::AnotherNode { slab_id, owner: via.clone() },
-            None => Verdict::Mine { slab_id, role },
+            None => Verdict::Mine {
+                slab_id,
+                role,
+                slab: probe.to_string_lossy().into_owned(),
+            },
         };
     }
 
@@ -767,14 +771,24 @@ mod tests {
         ));
 
         let s = survey(&m).unwrap();
+        let slab = fake.root.path().join("dev/sda2").to_string_lossy().into_owned();
         assert_eq!(
             s.drives[0].verdict,
             Verdict::Mine {
                 slab_id: "7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60".into(),
                 role: "data".into(),
+                slab: slab.clone(),
             }
         );
-        assert_eq!(s.intent(), crate::survey::Intent::AlreadyMine);
+        // The drive is /dev/sda and the thing that boots is /dev/sda2. A
+        // caller handed only the drive would have to find the slab again.
+        match s.intent() {
+            crate::survey::Intent::AlreadyMine { drive, slab: s2, .. } => {
+                assert!(drive.ends_with("sda"), "{drive}");
+                assert_eq!(s2, slab);
+            }
+            other => panic!("expected AlreadyMine, got {other:?}"),
+        }
     }
 
     /// The same slab, arriving over nvme-tcp. It is the appliance's export or

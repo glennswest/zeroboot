@@ -168,7 +168,9 @@ fn print_survey(survey: &zeroboot::survey::Survey) {
     }
     println!();
     match survey.intent() {
-        Intent::AlreadyMine => println!("already assimilated - nothing to do"),
+        Intent::AlreadyMine { drive, slab, slab_id } => {
+            println!("already assimilated - would boot slab {slab_id} on {slab} ({drive})");
+        }
         Intent::TakeOver { path } => println!("would take {path}"),
         // Nowhere to go is not a failure: the node boots on what the appliance
         // is serving. It still says what it looked at, because "did not

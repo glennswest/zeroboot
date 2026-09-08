@@ -18,7 +18,15 @@ use std::fmt;
 pub enum Verdict {
     /// A stormblock slab this node already owns. Nothing to do — this is a
     /// node that has already assimilated and is booting again.
-    Mine { slab_id: String, role: String },
+    Mine {
+        slab_id: String,
+        role: String,
+        /// The device the slab actually is: the drive itself when the slab was
+        /// written to the whole disk, and a partition of it when the disk was
+        /// laid out with an ESP beside it. This is the device that boots, and
+        /// it is not always the drive it was found on.
+        slab: String,
+    },
     /// A stormblock slab belonging to a different node. Never taken: two
     /// nodes writing one slab is how you lose both.
     AnotherNode { slab_id: String, owner: String },
@@ -46,13 +54,21 @@ impl Verdict {
     pub fn is_mine(&self) -> bool {
         matches!(self, Verdict::Mine { .. })
     }
+
+    /// What the slab is for, when this drive carries one of ours.
+    fn slab_role(&self) -> Option<&str> {
+        match self {
+            Verdict::Mine { role, .. } => Some(role),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Verdict::Mine { slab_id, role } => {
-                write!(f, "mine - stormblock slab {slab_id} ({role})")
+            Verdict::Mine { slab_id, role, slab } => {
+                write!(f, "mine - stormblock slab {slab_id} on {slab} ({role})")
             }
             Verdict::AnotherNode { slab_id, owner } => {
                 write!(f, "another node's - slab {slab_id} owned by {owner}")
@@ -85,9 +101,16 @@ pub struct Survey {
 }
 
 impl Survey {
-    /// Drives this node already owns.
+    /// Drives this node already owns, the one that boots first.
+    ///
+    /// A node can own more than one — a system slab and a data slab is the
+    /// ordinary case, and the split is the point of having roles at all. Only
+    /// the system slab boots, so it is the one a caller is handed; ties keep
+    /// the order the drives were seen in.
     pub fn mine(&self) -> Vec<&Drive> {
-        self.drives.iter().filter(|d| d.verdict.is_mine()).collect()
+        let mut v: Vec<&Drive> = self.drives.iter().filter(|d| d.verdict.is_mine()).collect();
+        v.sort_by_key(|d| if d.verdict.slab_role() == Some("system") { 0 } else { 1 });
+        v
     }
 
     /// Drives that may be taken, largest first — and among equals, solid
@@ -110,8 +133,15 @@ impl Survey {
     /// with nowhere to go boots anyway on whatever the appliance is serving,
     /// because assimilation is an improvement, not a precondition.
     pub fn intent(&self) -> Intent {
-        if !self.mine().is_empty() {
-            return Intent::AlreadyMine;
+        if let Some(already) = self.mine().iter().find_map(|d| match &d.verdict {
+            Verdict::Mine { slab_id, slab, .. } => Some(Intent::AlreadyMine {
+                drive: d.path.clone(),
+                slab: slab.clone(),
+                slab_id: slab_id.clone(),
+            }),
+            _ => None,
+        }) {
+            return already;
         }
         match self.available().first() {
             Some(d) => Intent::TakeOver { path: d.path.clone() },
@@ -130,8 +160,11 @@ impl Survey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "intent", rename_all = "snake_case")]
 pub enum Intent {
-    /// This node has already assimilated. Boot.
-    AlreadyMine,
+    /// This node has already assimilated. Boot — off `slab`, which is the
+    /// device the slab is on and not necessarily the drive it was found on.
+    /// Saying which costs nothing here and saves the caller from searching for
+    /// it a second time, with a second implementation of the same judgement.
+    AlreadyMine { drive: String, slab: String, slab_id: String },
     /// Nothing here is anyone's. Take it.
     TakeOver { path: String },
     /// Nowhere to go. Boot on the appliance's clone and say why — a node that
@@ -174,7 +207,12 @@ mod tests {
             owner: "node-2".into()
         }
         .is_available());
-        assert!(!Verdict::Mine { slab_id: "abc".into(), role: "data".into() }.is_available());
+        assert!(!Verdict::Mine {
+            slab_id: "abc".into(),
+            role: "data".into(),
+            slab: "/dev/sda".into()
+        }
+        .is_available());
     }
 
     /// The R230 that prompted this: a 2 TB disk carrying four partitions from
@@ -217,11 +255,49 @@ mod tests {
                 drive("/dev/sda", 1 << 40, true, Verdict::Mine {
                     slab_id: "7661cf8b".into(),
                     role: "data".into(),
+                    slab: "/dev/sda2".into(),
                 }),
                 drive("/dev/sdb", 1 << 40, false, Verdict::Blank),
             ],
         };
-        assert_eq!(s.intent(), Intent::AlreadyMine, "owning a slab settles it");
+        assert_eq!(
+            s.intent(),
+            Intent::AlreadyMine {
+                drive: "/dev/sda".into(),
+                slab: "/dev/sda2".into(),
+                slab_id: "7661cf8b".into(),
+            },
+            "owning a slab settles it, and says which device to boot"
+        );
+    }
+
+    /// A node with both a system slab and a data slab boots off the system
+    /// one. The drives are seen in name order and the roles decide, not the
+    /// order — otherwise which disk a node boots from depends on which SATA
+    /// port it happens to be in.
+    #[test]
+    fn the_system_slab_is_the_one_that_boots() {
+        let s = Survey {
+            drives: vec![
+                drive("/dev/sda", 4 << 40, true, Verdict::Mine {
+                    slab_id: "data-slab".into(),
+                    role: "data".into(),
+                    slab: "/dev/sda".into(),
+                }),
+                drive("/dev/sdb", 1 << 40, false, Verdict::Mine {
+                    slab_id: "system-slab".into(),
+                    role: "system".into(),
+                    slab: "/dev/sdb2".into(),
+                }),
+            ],
+        };
+        match s.intent() {
+            Intent::AlreadyMine { slab, slab_id, .. } => {
+                assert_eq!(slab, "/dev/sdb2");
+                assert_eq!(slab_id, "system-slab");
+            }
+            other => panic!("expected AlreadyMine, got {other:?}"),
+        }
     }
 
     #[test]

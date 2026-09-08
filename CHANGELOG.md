@@ -21,6 +21,16 @@
   another node. A slab in a partition of a local disk is `Mine` too, so a node
   booting off the disk it assimilated onto recognises its own work rather than
   reading it as a foreign partition table.
+- **feat(survey):** `Intent::AlreadyMine` says which device to boot. It carried
+  no path at all — only "something here is ours" — so a caller could not act on
+  it without searching for the slab again, with a second implementation of the
+  judgement to drift from the first. `Verdict::Mine` now records the device the
+  slab is actually on, which is a partition (`/dev/sda2`) on a disk laid out
+  with an ESP and the whole drive when the slab was written to one, and
+  `AlreadyMine` carries the drive, that device and the slab id.
+- **feat(survey):** when a node owns both a system slab and a data slab, the
+  system one is the one handed to the caller. Otherwise which disk a node boots
+  from depends on which port it is plugged into.
 - **feat(survey):** the end of a drive is named, not just counted. A backup GPT
   header and an mdraid v0.90/v1.0 superblock both live there and leave the
   front untouched, so a disk pulled out of a Linux array reads as blank from
