@@ -3,6 +3,39 @@
 ## [Unreleased]
 
 ### 2026-09-08
+- **feat(esp):** `esp` — read back the ESP of a drive `bootimage` laid out: the
+  loader entry, the kernel and initramfs it names, the bootloader, and the
+  command line. `gpt` and `fatfs` were already dependencies for writing these
+  disks, so reading one adds nothing. The tests build a real disk with
+  `bootimage` and read it, because writer and reader are the same repo and
+  drift apart silently otherwise.
+- **feat(survey):** owning a slab and being able to boot from it are now
+  different answers. `Intent::MineButNoneBoots` sits between `AlreadyMine` and
+  `NothingToTake`: nothing here may be taken because it is already ours, and
+  nothing here starts the node, so it asks the appliance. A slab formatted and
+  never filled, a boot disk whose ESP lost its kernel, and a surviving data
+  slab after the system disk died all land here — and all three used to read as
+  `AlreadyMine`, which is how a node declines to fetch the image it cannot come
+  up without.
+- **feat(esp, probe):** a drive can be claimed. Nothing in a stormblock slab
+  records an owner, so a disk moved between chassis was indistinguishable from
+  one that was always here — and `stormcos-state` holds the hostname that is
+  the node CA's subject CN, so adopting a moved disk means booting as somebody
+  else. `zeroboot claim --device /dev/sda` writes this machine's SMBIOS serial
+  into `stormcos/claim` on the drive's ESP; a claim naming another node makes
+  the drive `AnotherNode`, however local it is. It writes one file into a
+  filesystem already there — no format, no partitioning, nothing near the slab
+  — and refuses to take another node's claim without `--force`.
+- **feat(probe):** `machine_identity` reads the SMBIOS type 1 serial, the same
+  field stormbootx claims on, and rejects the placeholders firmware writes when
+  it has nothing to say (`Not Specified`, `To Be Filled By O.E.M.`, `0`). One of
+  those treated as an identity would make every machine of a model claim to be
+  the same node. No identity means claims are not checked and the old rule
+  stands, rather than a new way to fail to boot.
+- **docs:** a project `CLAUDE.md` with the work plan, the module shape, and the
+  two limits that are deliberate.
+
+### 2026-09-08
 - **feat(survey):** `zeroboot survey` — the judgement can now look at a real
   machine. `probe` walks `/sys/block` for every drive's size, rotational flag,
   model, partitions and transport, reads the head, the tail and three samples

@@ -46,6 +46,50 @@ read. Every verdict names its evidence, and anything unrecognised is `Foreign`
 | `Unreadable` | would not answer | never |
 | `Blank` | nothing recognisable | **yes** |
 
+Whose a slab is, and whether a drive boots, are different questions with
+different evidence, and the survey keeps them apart. A slab formatted an hour
+ago with nothing in it and no bootloader anywhere is as much `Mine` as a
+working boot disk; a data slab is `Mine` and is not supposed to boot at all. So
+a third answer sits beside "boot" and "take one":
+
+| intent | meaning |
+|---|---|
+| `AlreadyMine` | a slab of ours that boots — and *which device* to boot |
+| `MineButNoneBoots` | ours, and none of it starts the node: ask the appliance |
+| `TakeOver` | nothing here is anyone's; take it |
+| `NothingToTake` | nowhere to go; boot on the appliance's clone and say why |
+
+Collapsing the middle one into `AlreadyMine` is how a node with a dead system
+disk declines to fetch the image it cannot come up without.
+
+## Whose drive is it?
+
+Nothing in a stormblock slab records an owner — the superblock carries a slab
+uuid and a device uuid and no node identity — so a disk moved from one chassis
+to another is, on the evidence in it, indistinguishable from one that was
+always here. That matters more than it sounds: `stormcos-state` holds the
+hostname, PID 1 reads it, and it is the node CA's subject CN. A node that
+adopts a moved disk boots as somebody else.
+
+Two things answer it, in order:
+
+- **Where the drive is attached.** A slab that arrived over nvme-tcp, iSCSI or
+  Fibre Channel is the appliance's export or a LUN shared with another node.
+  Never taken, never booted.
+- **A claim on the ESP.** `zeroboot claim --device /dev/sda` writes this
+  machine's SMBIOS serial — the service tag, the same field stormbootx claims
+  on — into `stormcos/claim` on the drive's own ESP. A later boot compares it.
+  A claim naming somebody else makes the drive `AnotherNode`, however local it
+  is.
+
+A drive with no claim, or a claim this machine cannot check because its
+firmware will not say who it is, keeps the old rule: a drive in this chassis is
+this node's. That is no worse than before, and refusing to boot there would
+invent a new way to fail on a machine whose only fault is an empty DMI field —
+which is also why a placeholder serial (`Not Specified`, `To Be Filled By
+O.E.M.`, `0`) is treated as no identity rather than as one every machine of
+that model shares.
+
 Two lessons are baked into that table, both learned on a Dell R230. Its
 `/dev/sda` is a 2 TB disk carrying four partitions from a previous life — not
 blank, not ours, leave it. And on some boots `/dev/sda` is instead the iDRAC
@@ -110,5 +154,13 @@ only one.
 ## Status
 
 `survey` — the judgement and the machine it looks at — is implemented and
-tested, and is a subcommand. Format and volume creation are next; see issue #2
-for the design.
+tested, and is a subcommand, as is `claim`. Format and volume creation are
+next; see issue #2 for the design.
+
+One check is missing and is not zeroboot's to make: the loader entry names a
+boot volume (`stormblock.volume=boot-cp-01`), and there is no way to list the
+volumes inside a slab without attaching it over ublk — `stormblock slab list`
+gives the uuid, role, tier and slot counts and stops there. So zeroboot can say
+a disk carries a bootloader and that its command line points at the slab on the
+same disk, and cannot yet say the slab holds the volume it asks for. Filed on
+stormblock; until it lands, `boot_volume` is reported and not verified.
