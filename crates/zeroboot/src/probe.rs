@@ -242,7 +242,7 @@ fn judge(
         };
     }
 
-    if let Some(what) = signature(&sniffed) {
+    if let Some(what) = signature(&sniffed).or_else(|| sniffed.tail_signature()) {
         return Verdict::Foreign { what };
     }
 
@@ -343,6 +343,23 @@ impl Sniff {
         self.at(off, magic.len()) == Some(magic)
     }
 
+    /// What is at the end of the drive rather than the start. Two things put
+    /// themselves there and leave the front untouched: the backup GPT header
+    /// in the last sector, and an mdraid v0.90 or v1.0 superblock — which is
+    /// why a disk pulled out of an array can look blank from the front.
+    fn tail_signature(&self) -> Option<String> {
+        let t = &self.tail;
+        if t.len() >= 512 && t[t.len() - 512..t.len() - 504] == *b"EFI PART" {
+            return Some("GPT (backup header only)".into());
+        }
+        // 0xa92b4efc again, this time looked for through the tail: v1.0 sits
+        // 8 KiB from the end and v0.90 on the last 64 KiB boundary, and both
+        // are aligned.
+        if t.chunks_exact(4096).any(|c| c[..4] == [0xfc, 0x4e, 0x2b, 0xa9]) {
+            return Some("Linux md RAID member (superblock at the end)".into());
+        }
+        None
+    }
 }
 
 fn sniff(path: &Path) -> std::io::Result<Sniff> {
@@ -659,20 +676,16 @@ mod tests {
             // Inside the 64 MiB that is read whole, and deliberately not on
             // any round boundary: real data does not land where you sample.
             ("sdb", (4 << 20) + 12345),
-            ("sdc", (63 << 20) + 999),
-            // On the grain that covers the rest of the drive.
-            ("sdd", 1 << 30),
+            ("sdc", DEEP - 1),
+            // On the grain that covers the rest, which is anchored where the
+            // whole read stops.
+            ("sdd", DEEP + STRIDE),
             // And the last megabyte, which is read whole as well.
             ("sde", size - 4096),
         ];
         for (name, at) in dirty {
             fake.drive(name, size, false, &[]);
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .open(fake.root.path().join("dev").join(name))
-                .unwrap();
-            f.seek(SeekFrom::Start(at)).unwrap();
-            f.write_all(&[0x42]).unwrap();
+            dirty_at(&fake, name, at);
         }
 
         let s = survey(&fake.machine()).unwrap();
@@ -685,7 +698,56 @@ mod tests {
                 drive.path
             );
         }
-        assert!(s.available().len() == 1, "only the zeroed drive may be taken");
+        assert_eq!(s.available().len(), 1, "only the zeroed drive may be taken");
+    }
+
+    /// The honest limit, written down so nobody mistakes the check for a
+    /// proof: past the first 64 MiB the drive is sampled, and a single byte
+    /// that falls between two samples is not seen. Reading a 2 TB disk in full
+    /// on every boot is hours, so the design does not rest on this — a drive
+    /// that has ever been used carries a signature at one end or the other,
+    /// and that is what is checked first.
+    #[test]
+    fn a_single_byte_between_two_samples_is_not_seen() {
+        let fake = FakeMachine::new();
+        fake.drive("sda", 3 << 30, false, &[]);
+        dirty_at(&fake, "sda", DEEP + STRIDE / 2);
+
+        let s = survey(&fake.machine()).unwrap();
+        assert_eq!(s.drives[0].verdict, Verdict::Blank, "a sample is not a proof");
+    }
+
+    fn dirty_at(fake: &FakeMachine, name: &str, at: u64) {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .open(fake.root.path().join("dev").join(name))
+            .unwrap();
+        f.seek(SeekFrom::Start(at)).unwrap();
+        f.write_all(&[0x42]).unwrap();
+    }
+
+    /// A disk pulled out of a Linux array keeps its superblock at the end and
+    /// nothing at the front, so the tail is read and named rather than merely
+    /// counted as "something".
+    #[test]
+    fn a_raid_member_that_is_blank_from_the_front_is_still_a_raid_member() {
+        let size = 3 << 30;
+        let fake = FakeMachine::new();
+        fake.drive("sda", size, true, &[]);
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .open(fake.root.path().join("dev/sda"))
+            .unwrap();
+        f.seek(SeekFrom::Start(size - 8192)).unwrap();
+        f.write_all(&[0xfc, 0x4e, 0x2b, 0xa9]).unwrap();
+        drop(f);
+
+        let s = survey(&fake.machine()).unwrap();
+        assert!(
+            matches!(&s.drives[0].verdict, Verdict::Foreign { what } if what.contains("md RAID")),
+            "{:?}",
+            s.drives[0].verdict
+        );
     }
 
     /// A node booting off the disk it assimilated onto. The slab is in a
