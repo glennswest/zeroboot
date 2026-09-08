@@ -338,26 +338,6 @@ fn sh_quote(v: &str) -> String {
     format!("'{}'", flat.replace('\'', "'\\''"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::sh_quote;
-
-    #[test]
-    fn a_value_can_only_ever_be_one_string() {
-        assert_eq!(sh_quote("boot-local"), "'boot-local'");
-        assert_eq!(sh_quote("/dev/sda2"), "'/dev/sda2'");
-        // Spaces and semicolons are ordinary inside single quotes.
-        assert_eq!(sh_quote("GPT, 4 partitions"), "'GPT, 4 partitions'");
-        assert_eq!(sh_quote("a; rm -rf /"), "'a; rm -rf /'");
-        // A `$` must not expand.
-        assert_eq!(sh_quote("$(reboot)"), "'$(reboot)'");
-        // A quote closes and reopens rather than escaping the string.
-        assert_eq!(sh_quote("it's"), "'it'\\''s'");
-        assert_eq!(sh_quote("'; reboot; '"), "''\\''; reboot; '\\'''");
-        // And one value stays one line.
-        assert_eq!(sh_quote("two\nlines"), "'two lines'");
-    }
-}
 
 /// Progress, to stderr and to the kernel log — the initramfs console reads
 /// kmsg, and stdout is the shell's to evaluate.
@@ -520,4 +500,25 @@ fn human_size(bytes: u64) -> String {
         u += 1;
     }
     if u == 0 { format!("{bytes} B") } else { format!("{v:.2} {}", UNITS[u]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sh_quote;
+
+    #[test]
+    fn a_value_can_only_ever_be_one_string() {
+        assert_eq!(sh_quote("boot-local"), "'boot-local'");
+        assert_eq!(sh_quote("/dev/sda2"), "'/dev/sda2'");
+        // Spaces and semicolons are ordinary inside single quotes.
+        assert_eq!(sh_quote("GPT, 4 partitions"), "'GPT, 4 partitions'");
+        assert_eq!(sh_quote("a; rm -rf /"), "'a; rm -rf /'");
+        // A `$` must not expand.
+        assert_eq!(sh_quote("$(reboot)"), "'$(reboot)'");
+        // A quote closes and reopens rather than escaping the string.
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(sh_quote("'; reboot; '"), "''\\''; reboot; '\\'''");
+        // And one value stays one line.
+        assert_eq!(sh_quote("two\nlines"), "'two lines'");
+    }
 }
