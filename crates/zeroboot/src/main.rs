@@ -145,7 +145,16 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_target(false).init();
+    // Every diagnostic goes to stderr, without exception. `zeroboot boot`
+    // hands `init` a shell to `eval`, so anything on stdout that is not a
+    // KEY=value line is something the boot shell tries to execute — and this
+    // is not hypothetical: a fatfs BPB warning about an unrelated disk's ESP
+    // landed there, ANSI escapes and all.
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
 
     match cli.command {
@@ -310,11 +319,43 @@ fn claim_on_boot(machine: &probe::Machine, drive: Option<&zeroboot::survey::Driv
     }
 }
 
-/// `KEY=value` for a shell to `eval`, single-quoted so a reason containing a
-/// space, a `$` or a `;` cannot become something the shell runs.
+/// `KEY=value` for a shell to `eval`.
 fn emit(pairs: &[(&str, &str)]) {
     for (k, v) in pairs {
-        println!("{k}='{}'", v.replace('\n', " ").replace('\'', "'\\''"));
+        println!("{k}={}", sh_quote(v));
+    }
+}
+
+/// Quote a value so `eval` can only ever see it as one string.
+///
+/// Single quotes, with an embedded quote spliced as `'\''` — the only form a
+/// POSIX shell treats as wholly literal. A drive model or a verdict is not
+/// hostile input, but it is not ours either: it comes off a disk, and it ends
+/// up on the command line of a shell running as PID 1 before anything else on
+/// the machine exists. Newlines go too, so one value cannot become two lines.
+fn sh_quote(v: &str) -> String {
+    let flat: String = v.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+    format!("'{}'", flat.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sh_quote;
+
+    #[test]
+    fn a_value_can_only_ever_be_one_string() {
+        assert_eq!(sh_quote("boot-local"), "'boot-local'");
+        assert_eq!(sh_quote("/dev/sda2"), "'/dev/sda2'");
+        // Spaces and semicolons are ordinary inside single quotes.
+        assert_eq!(sh_quote("GPT, 4 partitions"), "'GPT, 4 partitions'");
+        assert_eq!(sh_quote("a; rm -rf /"), "'a; rm -rf /'");
+        // A `$` must not expand.
+        assert_eq!(sh_quote("$(reboot)"), "'$(reboot)'");
+        // A quote closes and reopens rather than escaping the string.
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(sh_quote("'; reboot; '"), "''\\''; reboot; '\\'''");
+        // And one value stays one line.
+        assert_eq!(sh_quote("two\nlines"), "'two lines'");
     }
 }
 
