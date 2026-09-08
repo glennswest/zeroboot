@@ -663,6 +663,72 @@ mod tests {
             self
         }
 
+        /// A real disk: GPT, an ESP carrying systemd-boot, a kernel, an
+        /// initramfs and a loader entry, and a slab in the partition beside
+        /// it — built by `bootimage`, which is the thing that builds them for
+        /// real, and then split into partition devices the way the kernel
+        /// presents them. The writer proving the reader, on the one path that
+        /// matters most.
+        fn boot_disk(&self, name: &str) -> &Self {
+            let work = self.root.path().join("build");
+            fs::create_dir_all(&work).unwrap();
+            for (f, c) in
+                [("vmlinuz", "kernel"), ("initramfs.img", "initrd"), ("boot.efi", "MZ")]
+            {
+                fs::write(work.join(f), c).unwrap();
+            }
+            let mut slab = vec![0u8; 4 << 20];
+            slab[..SLAB_MAGIC.len()].copy_from_slice(SLAB_MAGIC);
+            fs::write(work.join("root.slab"), &slab).unwrap();
+
+            let dev = self.root.path().join("dev").join(name);
+            crate::bootimage::build(&crate::bootimage::BootImageSpec {
+                kernel: work.join("vmlinuz"),
+                initramfs: work.join("initramfs.img"),
+                bootloader: work.join("boot.efi"),
+                slab: work.join("root.slab"),
+                volume: "boot-cp-01".into(),
+                esp_mib: 64,
+                image_store: None,
+                writable: vec![],
+                disk_device: format!("/dev/{name}"),
+                extra_cmdline: None,
+                out: dev.clone(),
+            })
+            .unwrap();
+
+            let sys = self.root.path().join("sys/block").join(name);
+            fs::create_dir_all(sys.join("queue")).unwrap();
+            fs::create_dir_all(sys.join("device")).unwrap();
+            let size = fs::metadata(&dev).unwrap().len();
+            fs::write(sys.join("size"), format!("{}\n", size / 512)).unwrap();
+            fs::write(sys.join("queue/rotational"), "1\n").unwrap();
+            fs::write(sys.join("removable"), "0\n").unwrap();
+            fs::write(sys.join("device/model"), "WDC WD20EFAX-68F\n").unwrap();
+
+            let disk = gpt::GptConfig::new().writable(false).open(&dev).unwrap();
+            let parts: Vec<(u32, gpt::partition::Partition)> =
+                disk.partitions().iter().map(|(i, p)| (*i, p.clone())).collect();
+            drop(disk);
+            for (i, p) in parts {
+                let child = format!("{name}{i}");
+                fs::create_dir_all(sys.join(&child)).unwrap();
+                fs::write(sys.join(&child).join("partition"), format!("{i}\n")).unwrap();
+                let start = p.first_lba * 512;
+                let len = (p.last_lba + 1 - p.first_lba) * 512;
+                let mut src = fs::File::open(&dev).unwrap();
+                src.seek(SeekFrom::Start(start)).unwrap();
+                let mut buf = vec![0u8; len as usize];
+                src.read_exact(&mut buf).unwrap();
+                fs::write(self.root.path().join("dev").join(&child), &buf).unwrap();
+            }
+            self
+        }
+
+        fn dev(&self, name: &str) -> PathBuf {
+            self.root.path().join("dev").join(name)
+        }
+
         /// A stand-in for the static stormblock the initramfs carries, which
         /// answers exactly as the real one does.
         fn stormblock(&self, answer: &str) -> PathBuf {
@@ -833,36 +899,174 @@ mod tests {
     /// partition, so the whole device looks like a GPT — and calling that
     /// foreign would mean a node never recognises its own work.
     #[test]
-    fn a_slab_in_a_partition_on_a_local_disk_is_mine() {
+    fn a_disk_this_node_assimilated_onto_is_mine_and_boots() {
         let fake = FakeMachine::new();
-        fake.drive("sda", 8 << 20, true, &gpt_header());
-        fake.partition("sda", "sda1", b"fake esp");
-        fake.partition("sda", "sda2", SLAB_MAGIC);
-
+        fake.boot_disk("sda");
         let mut m = fake.machine();
         m.stormblock = Some(fake.stormblock(
-            "sda2: slab 7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60 (role=data, tier=hot, 4096 slots, 3900 free)",
+            "sda2: slab 7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60 (role=system, tier=hot, 4096 slots, 3900 free)",
         ));
 
         let s = survey(&m).unwrap();
-        let slab = fake.root.path().join("dev/sda2").to_string_lossy().into_owned();
+        let d = &s.drives[0];
         assert_eq!(
-            s.drives[0].verdict,
+            d.verdict,
             Verdict::Mine {
                 slab_id: "7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60".into(),
-                role: "data".into(),
-                slab: slab.clone(),
+                role: "system".into(),
+                slab: fake.dev("sda2").to_string_lossy().into_owned(),
             }
         );
-        // The drive is /dev/sda and the thing that boots is /dev/sda2. A
-        // caller handed only the drive would have to find the slab again.
+
+        // And it boots: the ESP carries a loader entry, the kernel and the
+        // initramfs it names, and a bootloader.
+        assert!(d.boots(), "{:?}", d.esp);
+        let boot = d.esp.as_ref().unwrap().boot.as_ref().unwrap();
+        assert_eq!(boot.slab_device.as_deref(), Some("/dev/sda2"));
+        assert_eq!(boot.boot_volume.as_deref(), Some("boot-cp-01"));
+
         match s.intent() {
-            crate::survey::Intent::AlreadyMine { drive, slab: s2, .. } => {
+            crate::survey::Intent::AlreadyMine { drive, slab, .. } => {
                 assert!(drive.ends_with("sda"), "{drive}");
-                assert_eq!(s2, slab);
+                assert_eq!(slab, fake.dev("sda2").to_string_lossy());
             }
             other => panic!("expected AlreadyMine, got {other:?}"),
         }
+    }
+
+    /// The same disk with its kernel gone. Still ours, still a perfectly good
+    /// slab, and it starts nothing — so the node asks the appliance rather
+    /// than declining to fetch an image it cannot come up without.
+    #[test]
+    fn a_disk_of_ours_that_cannot_boot_sends_the_node_to_the_appliance() {
+        let fake = FakeMachine::new();
+        fake.boot_disk("sda");
+        strip_kernel(&fake.dev("sda"));
+
+        let mut m = fake.machine();
+        m.stormblock = Some(fake.stormblock(
+            "sda2: slab 7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60 (role=system, tier=hot, 4096 slots, 3900 free)",
+        ));
+
+        let s = survey(&m).unwrap();
+        assert!(s.drives[0].verdict.is_mine(), "it is still ours");
+        assert!(!s.drives[0].boots());
+        assert!(s.available().is_empty(), "and still not a drive to take");
+        match s.intent() {
+            crate::survey::Intent::MineButNoneBoots { because } => {
+                assert!(because[0].contains("vmlinuz"), "{because:?}");
+            }
+            other => panic!("expected MineButNoneBoots, got {other:?}"),
+        }
+    }
+
+    /// A disk pulled out of one chassis and put in another. Nothing in the
+    /// slab says whose it is, so the claim on the ESP is the only thing that
+    /// can say — and booting it would give this node the other one's hostname,
+    /// which is the node CA's subject CN.
+    #[test]
+    fn a_disk_claimed_by_another_node_is_not_ours_however_local_it_is() {
+        let fake = FakeMachine::new();
+        fake.boot_disk("sda").identity("THIS-NODE");
+        crate::esp::write_claim(
+            &fake.dev("sda"),
+            &crate::esp::Claim { node: "OTHER-NODE".into(), claimed: "2026-09-01T00:00:00Z".into() },
+        )
+        .unwrap();
+
+        let mut m = fake.machine();
+        m.stormblock = Some(fake.stormblock(
+            "sda2: slab 7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60 (role=system, tier=hot, 4096 slots, 3900 free)",
+        ));
+
+        let s = survey(&m).unwrap();
+        assert!(
+            matches!(&s.drives[0].verdict, Verdict::AnotherNode { owner, .. } if owner.contains("OTHER-NODE")),
+            "{:?}",
+            s.drives[0].verdict
+        );
+        assert!(s.available().is_empty(), "and never formatted");
+        assert!(matches!(s.intent(), crate::survey::Intent::NothingToTake { .. }));
+    }
+
+    #[test]
+    fn a_disk_this_node_claimed_is_still_ours() {
+        let fake = FakeMachine::new();
+        fake.boot_disk("sda").identity("THIS-NODE");
+        crate::esp::write_claim(
+            &fake.dev("sda"),
+            &crate::esp::Claim { node: "THIS-NODE".into(), claimed: "2026-09-01T00:00:00Z".into() },
+        )
+        .unwrap();
+
+        let mut m = fake.machine();
+        m.stormblock = Some(fake.stormblock(
+            "sda2: slab 7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60 (role=system, tier=hot, 4096 slots, 3900 free)",
+        ));
+
+        let s = survey(&m).unwrap();
+        assert!(s.drives[0].verdict.is_mine(), "{:?}", s.drives[0].verdict);
+        assert!(matches!(s.intent(), crate::survey::Intent::AlreadyMine { .. }));
+    }
+
+    /// A machine that will not say who it is cannot check a claim, so the
+    /// claim is not evidence either way and the old rule stands: a drive in
+    /// this chassis is this node's. Refusing to boot here would invent a new
+    /// way to fail on hardware whose only fault is an empty DMI field.
+    #[test]
+    fn a_claim_that_cannot_be_checked_does_not_take_the_drive_away() {
+        let fake = FakeMachine::new();
+        fake.boot_disk("sda").identity("Not Specified");
+        crate::esp::write_claim(
+            &fake.dev("sda"),
+            &crate::esp::Claim { node: "OTHER-NODE".into(), claimed: "2026-09-01T00:00:00Z".into() },
+        )
+        .unwrap();
+
+        let mut m = fake.machine();
+        m.stormblock = Some(fake.stormblock(
+            "sda2: slab 7661cf8b-1c4f-4a2e-9f11-7d3b5a2c8e60 (role=system, tier=hot, 4096 slots, 3900 free)",
+        ));
+
+        let s = survey(&m).unwrap();
+        assert!(s.drives[0].verdict.is_mine(), "{:?}", s.drives[0].verdict);
+    }
+
+    /// Firmware that has nothing to say says it in several ways, and every one
+    /// of them would make an entire model of machine claim to be one node.
+    #[test]
+    fn a_placeholder_serial_is_not_an_identity() {
+        let fake = FakeMachine::new();
+        for junk in ["Not Specified", "To Be Filled By O.E.M.", "System Serial Number", "0", ""] {
+            fake.identity(junk);
+            assert_eq!(
+                machine_identity(&fake.root.path().join("sys")),
+                None,
+                "{junk:?} is not an identity"
+            );
+        }
+        fake.identity("4F2XYZ1");
+        assert_eq!(
+            machine_identity(&fake.root.path().join("sys")),
+            Some("4F2XYZ1".to_string())
+        );
+    }
+
+    /// Remove the kernel the loader entry names, leaving everything else.
+    fn strip_kernel(disk: &Path) {
+        let d = gpt::GptConfig::new().writable(false).open(disk).unwrap();
+        let esp = d
+            .partitions()
+            .values()
+            .find(|p| p.part_type_guid == gpt::partition_types::EFI)
+            .cloned()
+            .unwrap();
+        drop(d);
+        let img = fs::OpenOptions::new().read(true).write(true).open(disk).unwrap();
+        let slice =
+            fscommon::StreamSlice::new(img, esp.first_lba * 512, (esp.last_lba + 1) * 512).unwrap();
+        let fs_ = fatfs::FileSystem::new(slice, fatfs::FsOptions::new()).unwrap();
+        fs_.root_dir().remove("vmlinuz").unwrap();
     }
 
     /// The same slab, arriving over nvme-tcp. It is the appliance's export or
