@@ -249,9 +249,6 @@ fn judge(
     // Nothing recognisable in the head or the tail. This is the one branch
     // that can end in a format, so it is the one branch that pays to look at
     // the whole drive rather than the ends of it.
-    if sniffed.has_anything() {
-        return Verdict::Foreign { what: "unrecognised data".into() };
-    }
     match first_nonzero(path) {
         Ok(None) => Verdict::Blank,
         Ok(Some(off)) => Verdict::Foreign { what: format!("unrecognised data at offset {off}") },
@@ -346,9 +343,6 @@ impl Sniff {
         self.at(off, magic.len()) == Some(magic)
     }
 
-    fn has_anything(&self) -> bool {
-        self.head.iter().chain(self.tail.iter()).any(|b| *b != 0)
-    }
 }
 
 fn sniff(path: &Path) -> std::io::Result<Sniff> {
@@ -382,9 +376,14 @@ fn first_nonzero(path: &Path) -> std::io::Result<Option<u64>> {
     let mut f = fs::File::open(path)?;
     let len = f.seek(SeekFrom::End(0))?;
 
+    // A drive smaller than the grain is simply read. It is quick, and it
+    // removes the only case where reading the front and then sampling the rest
+    // could leave a gap between the two.
+    let whole = if len < STRIDE { len } else { DEEP };
+
     let mut off = 0;
-    while off < DEEP.min(len) {
-        let chunk = region(&mut f, off, (1 << 20).min(len - off))?;
+    while off < whole {
+        let chunk = region(&mut f, off, (1 << 20).min(whole - off))?;
         if chunk.is_empty() {
             break;
         }
@@ -394,7 +393,9 @@ fn first_nonzero(path: &Path) -> std::io::Result<Option<u64>> {
         off += chunk.len() as u64;
     }
 
-    let mut at = DEEP.next_multiple_of(STRIDE);
+    // The grain picks up exactly where the whole read stopped, so there is
+    // nothing between them.
+    let mut at = whole;
     while at + SAMPLE <= len {
         let chunk = region(&mut f, at, SAMPLE)?;
         if let Some(i) = chunk.iter().position(|b| *b != 0) {
@@ -403,7 +404,7 @@ fn first_nonzero(path: &Path) -> std::io::Result<Option<u64>> {
         at += STRIDE;
     }
 
-    if len > DEEP + TAIL {
+    if len > whole + TAIL {
         let chunk = region(&mut f, len - TAIL, TAIL)?;
         if let Some(i) = chunk.iter().position(|b| *b != 0) {
             return Ok(Some(len - TAIL + i as u64));
