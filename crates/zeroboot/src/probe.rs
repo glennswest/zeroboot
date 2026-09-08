@@ -169,10 +169,17 @@ fn look_at(m: &Machine, me: Option<&str>, name: &str) -> Drive {
     let rotational = read_u64(sys.join("queue/rotational")).unwrap_or(1) == 1;
     let removable = read_u64(sys.join("removable")).unwrap_or(0) == 1;
     let model = read_trimmed(sys.join("device/model")).filter(|s| !s.is_empty());
+    // Where the drive says who it is. NVMe puts a serial under device/, SCSI
+    // exposes wwid at the top; take whichever answers.
+    let wwid = read_trimmed(sys.join("wwid"))
+        .or_else(|| read_trimmed(sys.join("device/wwid")))
+        .filter(|s| !s.is_empty());
+    let serial = read_trimmed(sys.join("device/serial")).filter(|s| !s.is_empty());
 
     // Read once and hand it to the judgement: the claim on it decides whose
     // the drive is, and the loader entry decides whether it boots.
     let found = esp::read(&path).ok().flatten();
+    let table = esp::partition_table(&path);
 
     let verdict = judge(m, &sys, name, &path, size_bytes, removable, me, found.as_ref());
 
@@ -181,6 +188,9 @@ fn look_at(m: &Machine, me: Option<&str>, name: &str) -> Drive {
         size_bytes,
         rotational,
         model,
+        wwid,
+        serial,
+        table,
         esp: found,
         verdict,
     }

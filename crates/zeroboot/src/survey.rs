@@ -93,6 +93,18 @@ pub struct Drive {
     /// verdict is right, and `/dev/sda` alone does not tell them which disk
     /// that is.
     pub model: Option<String>,
+    /// The drive's own name for itself, independent of where it is plugged in.
+    ///
+    /// A device path is not an identity — this machine's `/dev/sda` is
+    /// sometimes a 2 TB disk and sometimes an iDRAC virtual floppy. These are
+    /// what anything downstream should key on, and stormdrive's first line is
+    /// exactly that: identity that survives reboots and path changes.
+    pub wwid: Option<String>,
+    pub serial: Option<String>,
+    /// The GPT disk GUID and every partition's own GUID, when the drive has a
+    /// partition table. Written into the table itself, so they travel with the
+    /// disk between chassis and controllers.
+    pub table: Option<esp::Table>,
     /// What the drive's ESP says, when it has one: whether it can boot, what
     /// is missing if it cannot, and who has claimed it.
     ///
@@ -259,6 +271,9 @@ mod tests {
             size_bytes: size,
             rotational,
             model: None,
+            wwid: None,
+            serial: None,
+            table: None,
             esp: Some(esp::Esp {
                 boot: Some(esp::Boot {
                     cmdline: String::new(),

@@ -177,6 +177,57 @@ pub fn write_claim(drive: &Path, claim: &Claim) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A drive's partition table, for anything downstream that has to name a
+/// drive without saying `/dev/sda`.
+///
+/// stormdrive's whole first line is "stable identity that survives reboots and
+/// path changes", and a device path is neither — the R230 that prompted all of
+/// this has a `/dev/sda` that is sometimes a 2 TB disk and sometimes an iDRAC
+/// virtual floppy. A GPT disk GUID and per-partition GUIDs are written into the
+/// table itself and travel with the disk between chassis and controllers.
+#[derive(Debug, Clone, Serialize)]
+pub struct Table {
+    /// The GPT header's disk GUID.
+    pub disk_guid: String,
+    pub partitions: Vec<Partition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Partition {
+    /// 1-based, matching the device name the kernel gives it (`sda2`).
+    pub index: u32,
+    pub name: String,
+    /// The partition's own GUID — unique to this partition, forever.
+    pub guid: String,
+    /// What kind of partition it is (ESP, Linux filesystem, ...).
+    pub type_guid: String,
+    pub first_lba: u64,
+    pub last_lba: u64,
+    pub size_bytes: u64,
+}
+
+/// Read a drive's partition table. `None` when there is no GPT — an ordinary
+/// answer for a drive carrying a bare slab, not an error.
+pub fn partition_table(drive: &Path) -> Option<Table> {
+    let disk = gpt::GptConfig::new().writable(false).open(drive).ok()?;
+    let disk_guid = disk.guid().to_string();
+    let mut partitions: Vec<Partition> = disk
+        .partitions()
+        .iter()
+        .map(|(index, p)| Partition {
+            index: *index,
+            name: p.name.clone(),
+            guid: p.part_guid.to_string(),
+            type_guid: p.part_type_guid.guid.to_string(),
+            first_lba: p.first_lba,
+            last_lba: p.last_lba,
+            size_bytes: (p.last_lba + 1 - p.first_lba) * LB_SIZE,
+        })
+        .collect();
+    partitions.sort_by_key(|p| p.index);
+    Some(Table { disk_guid, partitions })
+}
+
 /// The byte range of the drive's EFI System Partition.
 fn esp_extent(drive: &Path) -> anyhow::Result<Option<(u64, u64)>> {
     let disk = match gpt::GptConfig::new().writable(false).open(drive) {
