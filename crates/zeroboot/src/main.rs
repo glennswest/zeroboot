@@ -12,7 +12,7 @@
 use zeroboot::{bootimage, esp, probe, survey::Intent};
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "zeroboot", version, about)]
@@ -186,7 +186,7 @@ fn main() -> anyhow::Result<()> {
 /// The guards are the point. A claim that can be written over anything records
 /// nothing, and a claim written onto a drive that is not ours is how you take
 /// a disk by accident rather than on purpose.
-fn claim(device: &PathBuf, node: Option<String>, sysfs: &PathBuf, force: bool) -> anyhow::Result<()> {
+fn claim(device: &Path, node: Option<String>, sysfs: &Path, force: bool) -> anyhow::Result<()> {
     let me = node.or_else(|| probe::machine_identity(sysfs)).ok_or_else(|| {
         anyhow::anyhow!(
             "this machine will not say who it is - no usable SMBIOS serial in \

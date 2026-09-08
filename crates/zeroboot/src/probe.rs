@@ -276,13 +276,13 @@ fn judge(
         // because this machine will not say who it is, leaves the old rule
         // standing — a drive in this chassis is this node's — which is no
         // worse than before and does not invent a new way to fail to boot.
-        if let (Some(claim), Some(me)) = (found.and_then(|e| e.claim.as_ref()), me) {
-            if claim.node != me {
-                return Verdict::AnotherNode {
-                    slab_id,
-                    owner: format!("node {} (claimed on its ESP)", claim.node),
-                };
-            }
+        if let (Some(claim), Some(me)) = (found.and_then(|e| e.claim.as_ref()), me)
+            && claim.node != me
+        {
+            return Verdict::AnotherNode {
+                slab_id,
+                owner: format!("node {} (claimed on its ESP)", claim.node),
+            };
         }
         return Verdict::Mine {
             slab_id,
