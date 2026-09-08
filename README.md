@@ -94,14 +94,15 @@ or a LUN shared with another node, and is `AnotherNode`. Nothing removable is
 ever taken — a USB stick in the front panel is not free space.
 
 `Blank` is reached one way only: nothing removable, nothing over the network,
-no partitions, no signature, and every byte read comes back zero. What is read
-is the first and last megabyte in full, then 64 KiB every megabyte through the
-first 64 MiB and 64 KiB every gigabyte after that — about 130 MiB and two
-thousand reads on a 2 TB disk, which is seconds, where reading all of it is
-hours in an initramfs on every boot. It is a sample and not a proof, and it
-does not have to be one: a drive that has ever been used carries a signature
-the head names, and one byte found anywhere in the grain makes the drive
-`Foreign`.
+no partitions, no signature, and every byte read comes back zero.
+
+Every other verdict is reached from the first and last megabyte, so a boot that
+finds nothing to take costs a megabyte a drive. `Blank` is the one verdict that
+leads to a format, so it is the one that pays to look properly: the first
+64 MiB whole — one sequential read, and where anything ever done to a drive
+leaves a trace — then 64 KiB every gigabyte to the end. About twenty seconds on
+a 2 TB spinning disk, against hours to read all of it. That is a sample and not
+a proof, which is exactly why it is the last check and not the only one.
 
 ## Status
 

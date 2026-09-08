@@ -246,11 +246,16 @@ fn judge(
         return Verdict::Foreign { what };
     }
 
-    // Nothing recognisable, and nothing at all: the head, the tail and three
-    // samples from the middle are zero. This is the only way to reach Blank.
-    match sniffed.first_nonzero() {
-        None => Verdict::Blank,
-        Some(off) => Verdict::Foreign { what: format!("unrecognised data at offset {off}") },
+    // Nothing recognisable in the head or the tail. This is the one branch
+    // that can end in a format, so it is the one branch that pays to look at
+    // the whole drive rather than the ends of it.
+    if sniffed.has_anything() {
+        return Verdict::Foreign { what: "unrecognised data".into() };
+    }
+    match first_nonzero(path) {
+        Ok(None) => Verdict::Blank,
+        Ok(Some(off)) => Verdict::Foreign { what: format!("unrecognised data at offset {off}") },
+        Err(e) => Verdict::Unreadable { why: format!("{e}") },
     }
 }
 
@@ -311,24 +316,25 @@ fn remote_transport(sys: &Path) -> Option<String> {
 
 const SLAB_MAGIC: &[u8] = b"STRMSLAB";
 
-/// The first megabyte, read whole: every signature worth naming lives in it.
+/// The first megabyte, read on sight: every signature worth naming lives in it.
 const HEAD: u64 = 1 << 20;
-/// The last megabyte: a backup GPT, and the mdraid superblocks that sit at the
-/// end of a member rather than the start.
+/// The last megabyte, read on sight: a backup GPT, and the mdraid superblocks
+/// that sit at the end of a member rather than the start.
 const TAIL: u64 = 1 << 20;
+/// How much of a drive is read *whole* before it may be called blank. Anything
+/// a drive has had done to it leaves something in the first tens of megabytes,
+/// and this is one sequential read — half a second on a spinning disk.
+const DEEP: u64 = 64 << 20;
+/// And after that, a grain over the rest: this much is read every
+/// [`STRIDE`] bytes.
 const SAMPLE: u64 = 64 << 10;
-/// Between the two, a grain over the whole drive — fine near the front, where
-/// anything that has ever been used puts something, and coarse after that.
-const NEAR: u64 = 1 << 20;
-const NEAR_UNTIL: u64 = 64 << 20;
-const FAR: u64 = 1 << 30;
+const STRIDE: u64 = 1 << 30;
 
-/// What was read off a drive. Enough to name what is on it, and — far more
-/// importantly — enough to be sure nothing is.
+/// The first and last of what is on a drive. Enough to name what is there,
+/// which is enough for every verdict except the one that formats something.
 struct Sniff {
     head: Vec<u8>,
-    /// (offset, bytes) for the tail and the samples from the middle.
-    rest: Vec<(u64, Vec<u8>)>,
+    tail: Vec<u8>,
 }
 
 impl Sniff {
@@ -340,30 +346,11 @@ impl Sniff {
         self.at(off, magic.len()) == Some(magic)
     }
 
-    /// Where the first byte that is not zero lives, if there is one.
-    fn first_nonzero(&self) -> Option<u64> {
-        if let Some(i) = self.head.iter().position(|b| *b != 0) {
-            return Some(i as u64);
-        }
-        self.rest
-            .iter()
-            .find_map(|(off, buf)| buf.iter().position(|b| *b != 0).map(|i| off + i as u64))
+    fn has_anything(&self) -> bool {
+        self.head.iter().chain(self.tail.iter()).any(|b| *b != 0)
     }
 }
 
-/// Read the drive, read-only, at the offsets that matter.
-///
-/// The head names almost everything and the tail catches what hides at the
-/// end. What is read in between is what stops a drive whose first megabyte was
-/// once `dd`'d to zero from reading as empty — 64 KiB every megabyte through
-/// the first 64 MiB, then 64 KiB every gigabyte to the end. On a 2 TB disk
-/// that is around two thousand reads and 130 MiB, which is seconds; reading
-/// all of it is hours, in an initramfs, on every boot.
-///
-/// It is a sample and not a proof, and the design is built so that it does not
-/// have to be a proof: a drive that has ever been used carries a signature the
-/// head names, and a drive that is only *probably* empty is still `Foreign` on
-/// the strength of a single byte found anywhere in the grain.
 fn sniff(path: &Path) -> std::io::Result<Sniff> {
     let mut f = fs::File::open(path)?;
     let len = f.seek(SeekFrom::End(0))?;
@@ -372,19 +359,58 @@ fn sniff(path: &Path) -> std::io::Result<Sniff> {
     if head.is_empty() {
         return Err(std::io::Error::other("read returned no bytes"));
     }
+    let tail = if len > HEAD + TAIL { region(&mut f, len - TAIL, TAIL)? } else { Vec::new() };
 
-    let mut rest = Vec::new();
-    let last = len.saturating_sub(TAIL);
-    let mut off = HEAD;
-    while off + SAMPLE <= last {
-        rest.push((off, region(&mut f, off, SAMPLE)?));
-        off += if off < NEAR_UNTIL { NEAR } else { FAR };
-    }
-    if len > HEAD + TAIL {
-        rest.push((last, region(&mut f, last, TAIL)?));
+    Ok(Sniff { head, tail })
+}
+
+/// Look at the whole drive, as far as is affordable, and say where the first
+/// byte that is not zero lives.
+///
+/// This is the expensive one, and it is run down exactly one branch: the drive
+/// carries no signature, has no partitions, arrived over nothing and is about
+/// to be called [`Verdict::Blank`], which is the one verdict that leads to a
+/// format. Every other verdict is reached from the head alone and costs a
+/// megabyte, so a node that has nothing to take pays nothing to find out.
+///
+/// The first 64 MiB is read whole — one sequential read, and the region where
+/// anything that has ever been done to a drive leaves a trace. After that,
+/// 64 KiB every gigabyte: on a 2 TB disk that is two thousand reads and about
+/// twenty seconds, against hours to read all of it. It is a sample and not a
+/// proof, which is why it is the *last* check and not the only one.
+fn first_nonzero(path: &Path) -> std::io::Result<Option<u64>> {
+    let mut f = fs::File::open(path)?;
+    let len = f.seek(SeekFrom::End(0))?;
+
+    let mut off = 0;
+    while off < DEEP.min(len) {
+        let chunk = region(&mut f, off, (1 << 20).min(len - off))?;
+        if chunk.is_empty() {
+            break;
+        }
+        if let Some(i) = chunk.iter().position(|b| *b != 0) {
+            return Ok(Some(off + i as u64));
+        }
+        off += chunk.len() as u64;
     }
 
-    Ok(Sniff { head, rest })
+    let mut at = DEEP.next_multiple_of(STRIDE);
+    while at + SAMPLE <= len {
+        let chunk = region(&mut f, at, SAMPLE)?;
+        if let Some(i) = chunk.iter().position(|b| *b != 0) {
+            return Ok(Some(at + i as u64));
+        }
+        at += STRIDE;
+    }
+
+    if len > DEEP + TAIL {
+        let chunk = region(&mut f, len - TAIL, TAIL)?;
+        if let Some(i) = chunk.iter().position(|b| *b != 0) {
+            return Ok(Some(len - TAIL + i as u64));
+        }
+    }
+
+    Ok(None)
 }
 
 fn region(f: &mut fs::File, off: u64, len: u64) -> std::io::Result<Vec<u8>> {
@@ -618,37 +644,47 @@ mod tests {
         assert!(matches!(s.intent(), crate::survey::Intent::NothingToTake { .. }));
     }
 
-    /// A drive is blank when it is zero, and one stray byte anywhere in the
-    /// grain is enough to say it is not. 4 MiB in is where this was caught on
-    /// a real 8 GB disk: a sparser sample read it as empty, which is the one
-    /// mistake this whole file exists to avoid.
+    /// A drive is blank when it is zero, and one stray byte is enough to say
+    /// it is not. 4 MiB in is where this was caught on a real 8 GB disk: an
+    /// earlier version sampled three points from the middle, missed it, and
+    /// reported "blank - available", which is the one mistake this whole file
+    /// exists to avoid.
     #[test]
     fn a_zeroed_drive_is_blank_and_a_dirtied_one_is_not() {
-        let size = 512 << 20;
+        let size = 3 << 30;
         let fake = FakeMachine::new();
         fake.drive("sda", size, false, &[]);
-        for (name, at) in [
-            ("sdb", 4 << 20),
-            ("sdc", 63 << 20),
-            ("sdd", size - (2 << 20)),
-        ] {
+        let dirty = [
+            // Inside the 64 MiB that is read whole, and deliberately not on
+            // any round boundary: real data does not land where you sample.
+            ("sdb", (4 << 20) + 12345),
+            ("sdc", (63 << 20) + 999),
+            // On the grain that covers the rest of the drive.
+            ("sdd", 1 << 30),
+            // And the last megabyte, which is read whole as well.
+            ("sde", size - 4096),
+        ];
+        for (name, at) in dirty {
             fake.drive(name, size, false, &[]);
-            let mut f =
-                fs::OpenOptions::new().write(true).open(fake.root.path().join("dev").join(name)).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .open(fake.root.path().join("dev").join(name))
+                .unwrap();
             f.seek(SeekFrom::Start(at)).unwrap();
             f.write_all(&[0x42]).unwrap();
         }
 
         let s = survey(&fake.machine()).unwrap();
         assert_eq!(s.drives[0].verdict, Verdict::Blank, "a zeroed drive is blank");
-        for d in &s.drives[1..] {
-            assert!(
-                matches!(&d.verdict, Verdict::Foreign { what } if what.contains("unrecognised")),
-                "{} has something on it and is not blank: {:?}",
-                d.path,
-                d.verdict
+        for (drive, (_, at)) in s.drives[1..].iter().zip(dirty.iter()) {
+            assert_eq!(
+                drive.verdict,
+                Verdict::Foreign { what: format!("unrecognised data at offset {at}") },
+                "{} has a byte at {at} and is not blank",
+                drive.path
             );
         }
+        assert!(s.available().len() == 1, "only the zeroed drive may be taken");
     }
 
     /// A node booting off the disk it assimilated onto. The slab is in a

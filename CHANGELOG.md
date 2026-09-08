@@ -26,12 +26,14 @@
   same device class.
 - **feat(survey):** `Blank` is reached one way only: nothing removable, nothing
   over the network, no partitions, no known signature, and every byte read
-  comes back zero — the first and last megabyte whole, then 64 KiB every
-  megabyte through the first 64 MiB and 64 KiB every gigabyte after that. A
-  disk whose first megabyte was once zeroed does not read as empty. The first
-  version sampled three points from the middle and read a real 8 GB disk with a
-  byte written 4 MiB in as blank, which is the one mistake this file exists to
-  avoid.
+  comes back zero. Every other verdict comes from the first and last megabyte,
+  so a boot with nothing to take costs a megabyte a drive; `Blank` is the one
+  verdict that leads to a format, so it alone pays for the first 64 MiB whole
+  plus 64 KiB every gigabyte to the end — about twenty seconds on a 2 TB
+  spinning disk, against hours to read all of it. A disk whose first megabyte
+  was once zeroed does not read as empty. The first version sampled three
+  points from the middle and called a real 8 GB disk with a byte written 4 MiB
+  in "blank - available", which is the one mistake this file exists to avoid.
 - **feat(survey):** `Drive` carries the drive's model string, and `Survey`,
   `Drive`, `Verdict` and `Intent` serialise, so `--json` reports the evidence
   and the conclusion separately.
