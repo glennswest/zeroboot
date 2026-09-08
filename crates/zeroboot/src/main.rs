@@ -283,16 +283,35 @@ fn boot(machine: &probe::Machine, report: &str, claim_it: bool) -> i32 {
             0
         }
         // Everything else ends the same way for `init` — ask the appliance —
-        // and differs only in what it says about why.
+        // and differs only in what it says about why, and in whether it names
+        // a drive to assimilate onto while it is up.
+        Intent::TakeOver { path } => {
+            say(&format!("{path} is nobody's - offering it for flow-over"));
+            ask(&format!("nothing of ours here yet; {path} is free"), &path)
+        }
+        // Ours already. A second assimilation while this node owns a slab is
+        // not something to infer: the drive it owns may be a half-finished
+        // assimilation, or a system disk somebody is about to replace, and
+        // stormblock says the same thing about its own guard — a policy cannot
+        // decide this, only somebody who has looked at the drive.
         Intent::MineButNoneBoots { because } => ask(&because.join("; "), ""),
         Intent::NothingToTake { because } => ask(&because.join("; "), ""),
-        Intent::TakeOver { path } => ask(
-            &format!("{path} is free, and zeroboot cannot yet format it"),
-            &path,
-        ),
     }
 }
 
+/// Boot from the appliance — and, when a drive here is genuinely nobody's,
+/// name it so `init` can hand it to `stormblock boot-local --local-disk`.
+///
+/// That flag is the assimilation. stormblock lays a data slab and a system
+/// slab on the drive and migrates the node's extents onto them in the
+/// background, after root is already up, one extent per lock cycle. zeroboot
+/// does not format anything and should not: what it contributes is the part
+/// stormblock's own guard cannot do. That guard refuses a drive carrying a
+/// *data slab*, because that is where a node's CA key lives — but it has
+/// nothing to say about a drive carrying somebody's ext4, or four partitions
+/// from a previous life, and `--local-disk` would format those without
+/// pausing. `ZB_TAKEABLE` is only ever a drive the survey called `Blank`,
+/// which is strictly stronger, so nothing zeroboot names can trip that guard.
 fn ask(reason: &str, takeable: &str) -> i32 {
     say(&format!("asking the appliance: {reason}"));
     emit(&[("ZB_ACTION", "ask-appliance"), ("ZB_REASON", reason), ("ZB_TAKEABLE", takeable)]);

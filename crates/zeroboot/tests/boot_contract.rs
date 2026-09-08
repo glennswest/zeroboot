@@ -215,6 +215,49 @@ fn the_report_carries_identity_that_outlives_a_device_path() {
     assert_eq!(v["intent"]["intent"], "already_mine");
 }
 
+/// A drive that is nobody's is offered as the flow-over target, so `init` can
+/// pass it to `stormblock boot-local --local-disk` and the node assimilates
+/// while it runs from the appliance. Naming it is zeroboot's whole part in
+/// that: stormblock's own guard refuses a drive with a data slab on it, and
+/// says nothing about one with somebody's filesystem on it.
+#[test]
+fn a_free_drive_is_offered_for_flow_over() {
+    let f = Fixture::new();
+    // A second drive with nothing on it at all.
+    let sys = f.at("sys/block/sdb");
+    fs::create_dir_all(sys.join("queue")).unwrap();
+    fs::create_dir_all(sys.join("device")).unwrap();
+    fs::write(sys.join("size"), "2097152\n").unwrap();
+    fs::write(sys.join("queue/rotational"), "0\n").unwrap();
+    fs::write(sys.join("removable"), "0\n").unwrap();
+    let blank = f.at("dev/sdb");
+    fs::File::create(&blank).unwrap().set_len(1 << 30).unwrap();
+
+    // And nothing of ours anywhere: the disk's slab will not identify.
+    let sb = f.stormblock("sda2: not a slab (bad slab magic)");
+    let out = f.boot(&sb);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "the node still boots, from the appliance");
+    assert!(stdout.contains("ZB_ACTION='ask-appliance'"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("ZB_TAKEABLE='{}'", blank.display())),
+        "the blank drive is the one offered, not the one with a partition table: {stdout}"
+    );
+}
+
+/// And a drive that is not blank is never offered, however much room is on it.
+/// `--local-disk` formats what it is given; the guard on the other side only
+/// refuses a data slab.
+#[test]
+fn a_drive_with_something_on_it_is_never_offered() {
+    let f = Fixture::new();
+    let sb = f.stormblock("sda2: not a slab (bad slab magic)");
+    let stdout = String::from_utf8(f.boot(&sb).stdout).unwrap();
+
+    assert!(stdout.contains("ZB_TAKEABLE=''"), "the only drive here has a GPT on it: {stdout}");
+}
+
 /// A boot claims the drive it boots, because there is no operator in a boot to
 /// type `zeroboot claim`. Without this the claim is never written on a real
 /// machine and the ownership check has nothing to check.
