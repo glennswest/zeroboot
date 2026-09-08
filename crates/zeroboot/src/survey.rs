@@ -9,6 +9,8 @@
 //! Deliberately read-only. Nothing here writes a byte; `survey` produces a
 //! report and the caller decides.
 
+use crate::esp;
+
 use serde::Serialize;
 use std::fmt;
 
@@ -91,7 +93,32 @@ pub struct Drive {
     /// verdict is right, and `/dev/sda` alone does not tell them which disk
     /// that is.
     pub model: Option<String>,
+    /// What the drive's ESP says, when it has one: whether it can boot, what
+    /// is missing if it cannot, and who has claimed it.
+    ///
+    /// Kept apart from the verdict on purpose. "Whose is this?" and "will it
+    /// boot?" are different questions with different evidence, and a node that
+    /// runs them together declines to ask the appliance for an image it needs.
+    pub esp: Option<esp::Esp>,
     pub verdict: Verdict,
+}
+
+impl Drive {
+    /// Whether this drive has everything it takes to boot itself: a
+    /// bootloader, a loader entry, and the kernel and initramfs that entry
+    /// names.
+    pub fn boots(&self) -> bool {
+        self.esp.as_ref().is_some_and(|e| e.boot.is_some())
+    }
+
+    /// Why it does not, in the drive's own words.
+    fn why_not(&self) -> String {
+        match &self.esp {
+            None => "no EFI System Partition on it".into(),
+            Some(e) if e.missing.is_empty() => "nothing bootable on its ESP".into(),
+            Some(e) => e.missing.join("; "),
+        }
+    }
 }
 
 /// Every drive on the machine, and what zeroboot intends to do.
@@ -111,6 +138,16 @@ impl Survey {
         let mut v: Vec<&Drive> = self.drives.iter().filter(|d| d.verdict.is_mine()).collect();
         v.sort_by_key(|d| if d.verdict.slab_role() == Some("system") { 0 } else { 1 });
         v
+    }
+
+    /// Drives this node owns *and* can boot from.
+    ///
+    /// Owning a slab and being able to boot are not the same thing and the
+    /// difference is not academic: a freshly formatted slab with no volumes in
+    /// it and no bootloader anywhere is as much "ours" as a working boot disk.
+    /// A data slab is ours and is not supposed to boot at all.
+    pub fn bootable(&self) -> Vec<&Drive> {
+        self.mine().into_iter().filter(|d| d.boots()).collect()
     }
 
     /// Drives that may be taken, largest first — and among equals, solid
@@ -133,7 +170,7 @@ impl Survey {
     /// with nowhere to go boots anyway on whatever the appliance is serving,
     /// because assimilation is an improvement, not a precondition.
     pub fn intent(&self) -> Intent {
-        if let Some(already) = self.mine().iter().find_map(|d| match &d.verdict {
+        if let Some(already) = self.bootable().iter().find_map(|d| match &d.verdict {
             Verdict::Mine { slab_id, slab, .. } => Some(Intent::AlreadyMine {
                 drive: d.path.clone(),
                 slab: slab.clone(),
@@ -142,6 +179,18 @@ impl Survey {
             _ => None,
         }) {
             return already;
+        }
+        // Ours, and none of it boots. Not a drive to take — it is already this
+        // node's — and not a node that can start on its own either, so it asks
+        // the appliance exactly as a node with no disk at all does.
+        let mine = self.mine();
+        if !mine.is_empty() {
+            return Intent::MineButNoneBoots {
+                because: mine
+                    .iter()
+                    .map(|d| format!("{} {} - {}", d.path, d.verdict, d.why_not()))
+                    .collect(),
+            };
         }
         match self.available().first() {
             Some(d) => Intent::TakeOver { path: d.path.clone() },
@@ -165,6 +214,15 @@ pub enum Intent {
     /// Saying which costs nothing here and saves the caller from searching for
     /// it a second time, with a second implementation of the same judgement.
     AlreadyMine { drive: String, slab: String, slab_id: String },
+    /// This node owns a slab here and none of them boots — a system disk with
+    /// no bootloader on it, a slab formatted and never filled, or a data slab
+    /// on its own, which is not supposed to boot.
+    ///
+    /// Distinct from both of the others on purpose. Nothing here may be taken,
+    /// because it is already ours; and nothing here can start the node, so it
+    /// asks the appliance. Reporting this as `AlreadyMine` is how a node
+    /// declines to fetch an image it cannot start without.
+    MineButNoneBoots { because: Vec<String> },
     /// Nothing here is anyone's. Take it.
     TakeOver { path: String },
     /// Nowhere to go. Boot on the appliance's clone and say why — a node that
@@ -193,8 +251,30 @@ impl Survey {
 mod tests {
     use super::*;
 
+    /// A drive that boots, unless a test says otherwise: most of these are
+    /// about ownership, and having to spell out an ESP in each would bury it.
     fn drive(path: &str, size: u64, rotational: bool, verdict: Verdict) -> Drive {
-        Drive { path: path.into(), size_bytes: size, rotational, model: None, verdict }
+        Drive {
+            path: path.into(),
+            size_bytes: size,
+            rotational,
+            model: None,
+            esp: Some(esp::Esp {
+                boot: Some(esp::Boot {
+                    cmdline: String::new(),
+                    slab_device: None,
+                    boot_volume: None,
+                }),
+                claim: None,
+                missing: vec![],
+            }),
+            verdict,
+        }
+    }
+
+    fn without_an_esp(mut d: Drive) -> Drive {
+        d.esp = None;
+        d
     }
 
     #[test]
@@ -312,6 +392,75 @@ mod tests {
         let order: Vec<&str> = s.available().iter().map(|d| d.path.as_str()).collect();
         assert_eq!(order, vec!["/dev/sdc", "/dev/sdb", "/dev/sda"]);
         assert_eq!(s.intent(), Intent::TakeOver { path: "/dev/sdc".into() });
+    }
+
+    /// Owning a slab is not the same as being able to start from it. A node
+    /// whose system disk carries a slab but no bootloader — a slab formatted
+    /// and never filled, or a boot disk whose ESP was wiped — must ask the
+    /// appliance, exactly as a node with no disk does. Calling that
+    /// `AlreadyMine` is how a node declines to fetch the image it cannot start
+    /// without.
+    #[test]
+    fn a_slab_that_boots_nothing_does_not_settle_the_boot() {
+        let s = Survey {
+            drives: vec![without_an_esp(drive("/dev/sda", 1 << 40, true, Verdict::Mine {
+                slab_id: "7661cf8b".into(),
+                role: "system".into(),
+                slab: "/dev/sda".into(),
+            }))],
+        };
+        match s.intent() {
+            Intent::MineButNoneBoots { because } => {
+                assert_eq!(because.len(), 1);
+                assert!(because[0].contains("/dev/sda"), "{because:?}");
+                assert!(because[0].contains("no EFI System Partition"), "{because:?}");
+            }
+            other => panic!("expected MineButNoneBoots, got {other:?}"),
+        }
+        // And it is still not a drive to take: it is already ours.
+        assert!(s.available().is_empty());
+    }
+
+    /// The case that makes the distinction earn its keep: the system disk died
+    /// and the data disk survived. The node owns a slab, the slab is fine, and
+    /// there is nothing on it to boot.
+    #[test]
+    fn a_surviving_data_slab_does_not_pretend_to_be_a_boot_disk() {
+        let s = Survey {
+            drives: vec![without_an_esp(drive("/dev/sdb", 4 << 40, true, Verdict::Mine {
+                slab_id: "data-slab".into(),
+                role: "data".into(),
+                slab: "/dev/sdb".into(),
+            }))],
+        };
+        assert!(matches!(s.intent(), Intent::MineButNoneBoots { .. }));
+    }
+
+    /// With one of each, the bootable one settles it — and it is picked
+    /// because it boots, not because of where it sits in the list.
+    #[test]
+    fn the_drive_that_boots_is_the_one_chosen() {
+        let s = Survey {
+            drives: vec![
+                without_an_esp(drive("/dev/sda", 4 << 40, true, Verdict::Mine {
+                    slab_id: "data-slab".into(),
+                    role: "system".into(),
+                    slab: "/dev/sda".into(),
+                })),
+                drive("/dev/sdb", 1 << 40, false, Verdict::Mine {
+                    slab_id: "boot-slab".into(),
+                    role: "data".into(),
+                    slab: "/dev/sdb2".into(),
+                }),
+            ],
+        };
+        match s.intent() {
+            Intent::AlreadyMine { slab_id, slab, .. } => {
+                assert_eq!(slab_id, "boot-slab");
+                assert_eq!(slab, "/dev/sdb2");
+            }
+            other => panic!("expected AlreadyMine, got {other:?}"),
+        }
     }
 
     /// Nowhere to go is not a failure. The node still boots on what the

@@ -24,6 +24,7 @@
 //!
 //! Nothing here writes a byte. Every device is opened read-only.
 
+use crate::esp;
 use crate::survey::{Drive, Survey, Verdict};
 
 use std::fs;
@@ -50,6 +51,13 @@ pub struct Machine {
     /// Restrict the survey to these drives, by bare name or full path. Empty
     /// means every drive the machine has.
     pub only: Vec<String>,
+    /// Who this machine is. `None` means read it where the firmware put it.
+    ///
+    /// It decides whether a claim written on a drive is this node's own, so
+    /// getting it from the same place stormbootx claims on matters more than
+    /// getting it cheaply: two implementations of "who is this machine" drift,
+    /// and the one in firmware is the one proven on hardware.
+    pub identity: Option<String>,
 }
 
 impl Default for Machine {
@@ -59,8 +67,31 @@ impl Default for Machine {
             dev: PathBuf::from("/dev"),
             stormblock: find_stormblock(),
             only: Vec::new(),
+            identity: None,
         }
     }
+}
+
+/// Placeholders firmware writes when it has nothing to say. Treating one of
+/// these as an identity would make every machine of a given model claim to be
+/// the same node, which is worse than having no identity at all.
+const NOT_AN_IDENTITY: [&str; 7] = [
+    "not specified",
+    "to be filled by o.e.m.",
+    "system serial number",
+    "default string",
+    "none",
+    "0",
+    "unknown",
+];
+
+/// Who this machine is, as the firmware names it: SMBIOS type 1 serial, which
+/// on a Dell is the service tag. The same field stormbootx claims on and the
+/// initramfs falls back to.
+pub fn machine_identity(sysfs: &Path) -> Option<String> {
+    read_trimmed(sysfs.join("class/dmi/id/product_serial"))
+        .filter(|s| !s.is_empty())
+        .filter(|s| !NOT_AN_IDENTITY.contains(&s.to_ascii_lowercase().as_str()))
 }
 
 /// The initramfs path first, since that is where this runs.
@@ -97,10 +128,11 @@ pub fn survey(m: &Machine) -> anyhow::Result<Survey> {
         .collect();
     names.sort();
 
+    let me = m.identity.clone().or_else(|| machine_identity(&m.sysfs));
     let drives = names
         .into_iter()
         .filter(|n| m.wants(n))
-        .map(|name| look_at(m, &name))
+        .map(|name| look_at(m, me.as_deref(), &name))
         .collect();
 
     Ok(Survey { drives })
@@ -127,7 +159,7 @@ fn is_not_a_drive(name: &str) -> bool {
     NOT_DRIVES.iter().any(|p| name.starts_with(p))
 }
 
-fn look_at(m: &Machine, name: &str) -> Drive {
+fn look_at(m: &Machine, me: Option<&str>, name: &str) -> Drive {
     let sys = m.sysfs.join("block").join(name);
     let path = m.dev.join(name);
 
@@ -138,13 +170,25 @@ fn look_at(m: &Machine, name: &str) -> Drive {
     let removable = read_u64(sys.join("removable")).unwrap_or(0) == 1;
     let model = read_trimmed(sys.join("device/model")).filter(|s| !s.is_empty());
 
-    let verdict = judge(m, &sys, name, &path, size_bytes, removable);
+    // Read once and hand it to the judgement: the claim on it decides whose
+    // the drive is, and the loader entry decides whether it boots.
+    let found = esp::read(&path).ok().flatten();
 
-    Drive { path: path.to_string_lossy().into_owned(), size_bytes, rotational, model, verdict }
+    let verdict = judge(m, &sys, name, &path, size_bytes, removable, me, found.as_ref());
+
+    Drive {
+        path: path.to_string_lossy().into_owned(),
+        size_bytes,
+        rotational,
+        model,
+        esp: found,
+        verdict,
+    }
 }
 
 /// What this drive is. The order is the argument: every branch that ends in
 /// "leave it alone" is taken before anything can conclude "blank".
+#[allow(clippy::too_many_arguments)]
 fn judge(
     m: &Machine,
     sys: &Path,
@@ -152,6 +196,8 @@ fn judge(
     path: &Path,
     size_bytes: u64,
     removable: bool,
+    me: Option<&str>,
+    found: Option<&esp::Esp>,
 ) -> Verdict {
     // An empty drive bay is not an empty drive. The iDRAC virtual floppy is
     // present, is /dev/sdb, and has no medium; it reports zero sectors and
@@ -216,13 +262,32 @@ fn judge(
                 ),
             };
         };
-        return match &remote {
-            Some(via) => Verdict::AnotherNode { slab_id, owner: via.clone() },
-            None => Verdict::Mine {
-                slab_id,
-                role,
-                slab: probe.to_string_lossy().into_owned(),
-            },
+        if let Some(via) = &remote {
+            return Verdict::AnotherNode { slab_id, owner: via.clone() };
+        }
+        // Local. Nothing in the superblock says whose it is — it has a slab
+        // uuid and a device uuid and no node identity — so the only thing that
+        // can distinguish "this node's disk" from "a disk somebody moved into
+        // this chassis" is a claim the owner wrote down.
+        //
+        // A claim naming somebody else is decisive: this is not our drive, and
+        // booting it would give this node another node's hostname, which is
+        // the node CA's subject CN. No claim, or a claim we cannot check
+        // because this machine will not say who it is, leaves the old rule
+        // standing — a drive in this chassis is this node's — which is no
+        // worse than before and does not invent a new way to fail to boot.
+        if let (Some(claim), Some(me)) = (found.and_then(|e| e.claim.as_ref()), me) {
+            if claim.node != me {
+                return Verdict::AnotherNode {
+                    slab_id,
+                    owner: format!("node {} (claimed on its ESP)", claim.node),
+                };
+            }
+        }
+        return Verdict::Mine {
+            slab_id,
+            role,
+            slab: probe.to_string_lossy().into_owned(),
         };
     }
 
