@@ -9,10 +9,12 @@
 //! Deliberately read-only. Nothing here writes a byte; `survey` produces a
 //! report and the caller decides.
 
+use serde::Serialize;
 use std::fmt;
 
 /// What a drive turned out to be.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum Verdict {
     /// A stormblock slab this node already owns. Nothing to do — this is a
     /// node that has already assimilated and is booting again.
@@ -63,16 +65,21 @@ impl fmt::Display for Verdict {
 }
 
 /// One drive, judged.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Drive {
     pub path: String,
     pub size_bytes: u64,
     pub rotational: bool,
+    /// What the drive says it is, when it says anything — the SCSI/NVMe model
+    /// string. A survey is meant to be read by someone deciding whether the
+    /// verdict is right, and `/dev/sda` alone does not tell them which disk
+    /// that is.
+    pub model: Option<String>,
     pub verdict: Verdict,
 }
 
 /// Every drive on the machine, and what zeroboot intends to do.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Survey {
     pub drives: Vec<Drive>,
 }
@@ -120,7 +127,8 @@ impl Survey {
 }
 
 /// What the survey concluded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "intent", rename_all = "snake_case")]
 pub enum Intent {
     /// This node has already assimilated. Boot.
     AlreadyMine,
@@ -132,12 +140,28 @@ pub enum Intent {
     NothingToTake { because: Vec<String> },
 }
 
+/// A survey as it leaves the process: what was seen, and what follows from
+/// it. The two are separate on purpose — the drives are evidence and the
+/// intent is the conclusion drawn from it, and anyone checking the second
+/// needs the first in front of them.
+#[derive(Debug, Clone, Serialize)]
+pub struct Report {
+    pub drives: Vec<Drive>,
+    pub intent: Intent,
+}
+
+impl Survey {
+    pub fn report(&self) -> Report {
+        Report { drives: self.drives.clone(), intent: self.intent() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn drive(path: &str, size: u64, rotational: bool, verdict: Verdict) -> Drive {
-        Drive { path: path.into(), size_bytes: size, rotational, verdict }
+        Drive { path: path.into(), size_bytes: size, rotational, model: None, verdict }
     }
 
     #[test]

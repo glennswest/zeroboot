@@ -9,7 +9,7 @@
 //! written in pure Rust straight into the image file — no root, no loop
 //! devices, no external partitioning/format tooling.
 
-use zeroboot::bootimage;
+use zeroboot::{bootimage, probe, survey::Intent};
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -23,6 +23,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Look at this machine's drives and say what is on each one, and what
+    /// would be taken. Reads only — nothing here writes a byte.
+    Survey {
+        /// Report as JSON rather than a table.
+        #[arg(long)]
+        json: bool,
+        /// Only look at these drives, by name or path (e.g. sda, /dev/sda).
+        /// Repeatable; empty = every drive on the machine.
+        #[arg(long = "device")]
+        devices: Vec<String>,
+        /// The stormblock binary that identifies a slab. Defaults to the
+        /// static one the initramfs carries, then $PATH. Without it a slab is
+        /// still recognised by its magic, but cannot be named — and an
+        /// unnameable slab is never taken.
+        #[arg(long)]
+        stormblock: Option<PathBuf>,
+        /// sysfs mount point.
+        #[arg(long, default_value = "/sys")]
+        sysfs: PathBuf,
+        /// Where the device nodes are.
+        #[arg(long, default_value = "/dev")]
+        dev: PathBuf,
+    },
     /// Build a bootable disk image: ESP (systemd-boot + kernel + initramfs)
     /// plus the stormblock slab payload.
     BootImage {
@@ -71,6 +94,21 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Survey { json, devices, stormblock, sysfs, dev } => {
+            let machine = probe::Machine {
+                sysfs,
+                dev,
+                stormblock: stormblock.or_else(|| probe::Machine::default().stormblock),
+                only: devices,
+            };
+            let survey = probe::survey(&machine)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&survey.report())?);
+            } else {
+                print_survey(&survey);
+            }
+            Ok(())
+        }
         Command::BootImage {
             kernel,
             initramfs,
@@ -113,4 +151,44 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// The survey as something to read. A verdict nobody looks at is a verdict
+/// nobody checks, and this one decides whether a disk gets formatted.
+fn print_survey(survey: &zeroboot::survey::Survey) {
+    for d in &survey.drives {
+        println!(
+            "{:<14} {:>9}  {:<9} {:<18} {}",
+            d.path,
+            human_size(d.size_bytes),
+            if d.rotational { "spinning" } else { "solid" },
+            d.model.as_deref().unwrap_or("-"),
+            d.verdict,
+        );
+    }
+    println!();
+    match survey.intent() {
+        Intent::AlreadyMine => println!("already assimilated - nothing to do"),
+        Intent::TakeOver { path } => println!("would take {path}"),
+        // Nowhere to go is not a failure: the node boots on what the appliance
+        // is serving. It still says what it looked at, because "did not
+        // assimilate" and "could not" look identical from outside.
+        Intent::NothingToTake { because } => {
+            println!("nothing to take:");
+            for line in because {
+                println!("  {line}");
+            }
+        }
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1000.0 && u < UNITS.len() - 1 {
+        v /= 1000.0;
+        u += 1;
+    }
+    if u == 0 { format!("{bytes} B") } else { format!("{v:.2} {}", UNITS[u]) }
 }

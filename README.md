@@ -60,7 +60,45 @@ evidence of emptiness.
 
 Both carry the same zeroboot; only how they arrive differs.
 
+## Looking at a machine
+
+```
+zeroboot survey
+```
+
+reads `/sys/block`, reads the first and last of what is on each drive, and
+prints the table above with the evidence for every line:
+
+```
+/dev/sda        2.00 TB  spinning  WDC WD20EFAX-68F   not ours - GPT, 4 partitions
+/dev/sdb            0 B  spinning  Virtual Floppy     unreadable - no medium (reports zero sectors)
+
+nothing to take:
+  /dev/sda not ours - GPT, 4 partitions
+  /dev/sdb unreadable - no medium (reports zero sectors)
+```
+
+`--json` gives the same thing to a machine. It writes nothing: every device is
+opened read-only, and the subcommand has no way to format anything.
+
+A slab is identified by asking `stormblock slab list`, the same static binary
+the initramfs already carries and already uses for exactly this probe — so
+there is one implementation of the superblock rather than two that drift.
+Without it a slab is still recognised by its magic but cannot be named, and an
+unnameable slab is `Foreign`.
+
+Where a drive is attached is part of what it is. A slab on a disk inside this
+chassis was written by this node in an earlier life and is `Mine`; the same
+slab arriving over nvme-tcp, iSCSI or Fibre Channel is the appliance's export
+or a LUN shared with another node, and is `AnotherNode`. Nothing removable is
+ever taken — a USB stick in the front panel is not free space.
+
+`Blank` is reached one way only: nothing removable, nothing over the network,
+no partitions, no signature, and the head, the tail and three samples from the
+middle all read as zero.
+
 ## Status
 
-`survey` — the judgement — is implemented and tested. Format and volume
-creation are next; see issue #2 for the design.
+`survey` — the judgement and the machine it looks at — is implemented and
+tested, and is a subcommand. Format and volume creation are next; see issue #2
+for the design.

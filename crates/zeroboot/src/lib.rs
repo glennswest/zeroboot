@@ -14,12 +14,15 @@
 //! a ramdisk and moved, with a window where the node's own identity exists
 //! only in RAM. Doing it in the initramfs costs seconds and removes both.
 //!
-//! [`survey`] is the judgement: what is on each drive and whose it is. It
-//! writes nothing.
+//! [`survey`] is the judgement: what is on each drive and whose it is, and
+//! [`probe`] is the eyes — it walks `/sys/block`, reads what is on each drive
+//! and hands the judgement something to judge. Both write nothing; the caller
+//! decides.
 
 //! Boot-artifact assembly lives here too, reusable by stormcos_builder and
 //! other tooling; the binary is a thin CLI over it.
 
+pub mod probe;
 pub mod survey;
 
 pub mod bootimage;
