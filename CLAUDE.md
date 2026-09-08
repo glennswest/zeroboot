@@ -39,11 +39,11 @@ destructive is opt-in and named.
 - [x] `survey` — the judgement (#3)
 - [x] `probe` — drive enumeration, verdicts, `zeroboot survey` (#3)
 - [x] `Intent::AlreadyMine` carries the device that actually boots
-- [ ] **in progress:** `Mine` is not the same as bootable — check the ESP, and
-      distinguish "ours and boots" from "ours and does not" (issue #2 comment)
-- [ ] **in progress:** whose slab is it — a claim record in the ESP, checked
-      against the SMBIOS service tag, so a disk moved between chassis does not
-      change hands silently (issue #2 comment)
+- [x] `Mine` is not the same as bootable — `esp.rs` reads the loader entry, and
+      `Intent::MineButNoneBoots` is the third answer (issue #2 comment)
+- [x] whose slab is it — a claim in the ESP, checked against the SMBIOS service
+      tag, so a disk moved between chassis does not change hands silently
+      (issue #2 comment)
 - [ ] format and volume creation — assimilation proper (#2)
 
 ## Known limits, deliberately
