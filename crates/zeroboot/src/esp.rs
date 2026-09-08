@@ -26,7 +26,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use fatfs::{FsOptions, Read as _, Write as _};
+use fatfs::FsOptions;
 use fscommon::StreamSlice;
 use serde::Serialize;
 
@@ -198,9 +198,7 @@ struct Entry {
     options: Option<String>,
 }
 
-fn loader_entry<IO: fatfs::ReadWriteSeek, TP: fatfs::TimeProvider, OCC: fatfs::OemCpConverter>(
-    root: &fatfs::Dir<'_, IO, TP, OCC>,
-) -> Option<Entry> {
+fn loader_entry<T: fatfs::ReadWriteSeek>(root: &fatfs::Dir<'_, T>) -> Option<Entry> {
     let dir = root.open_dir("loader/entries").ok()?;
     for e in dir.iter().flatten() {
         let name = e.file_name();
@@ -223,10 +221,7 @@ fn loader_entry<IO: fatfs::ReadWriteSeek, TP: fatfs::TimeProvider, OCC: fatfs::O
     None
 }
 
-fn read_file<IO: fatfs::ReadWriteSeek, TP: fatfs::TimeProvider, OCC: fatfs::OemCpConverter>(
-    root: &fatfs::Dir<'_, IO, TP, OCC>,
-    path: &str,
-) -> Option<String> {
+fn read_file<T: fatfs::ReadWriteSeek>(root: &fatfs::Dir<'_, T>, path: &str) -> Option<String> {
     let mut f = root.open_file(path).ok()?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
