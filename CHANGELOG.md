@@ -25,9 +25,13 @@
   in the front panel is not free space, and the iDRAC virtual floppy is the
   same device class.
 - **feat(survey):** `Blank` is reached one way only: nothing removable, nothing
-  over the network, no partitions, no known signature, and the head, the tail
-  and three 64 KiB samples from the middle all zero. A disk whose first
-  megabyte was once zeroed does not read as empty.
+  over the network, no partitions, no known signature, and every byte read
+  comes back zero — the first and last megabyte whole, then 64 KiB every
+  megabyte through the first 64 MiB and 64 KiB every gigabyte after that. A
+  disk whose first megabyte was once zeroed does not read as empty. The first
+  version sampled three points from the middle and read a real 8 GB disk with a
+  byte written 4 MiB in as blank, which is the one mistake this file exists to
+  avoid.
 - **feat(survey):** `Drive` carries the drive's model string, and `Survey`,
   `Drive`, `Verdict` and `Intent` serialise, so `--json` reports the evidence
   and the conclusion separately.

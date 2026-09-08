@@ -94,8 +94,14 @@ or a LUN shared with another node, and is `AnotherNode`. Nothing removable is
 ever taken — a USB stick in the front panel is not free space.
 
 `Blank` is reached one way only: nothing removable, nothing over the network,
-no partitions, no signature, and the head, the tail and three samples from the
-middle all read as zero.
+no partitions, no signature, and every byte read comes back zero. What is read
+is the first and last megabyte in full, then 64 KiB every megabyte through the
+first 64 MiB and 64 KiB every gigabyte after that — about 130 MiB and two
+thousand reads on a 2 TB disk, which is seconds, where reading all of it is
+hours in an initramfs on every boot. It is a sample and not a proof, and it
+does not have to be one: a drive that has ever been used carries a signature
+the head names, and one byte found anywhere in the grain makes the drive
+`Foreign`.
 
 ## Status
 

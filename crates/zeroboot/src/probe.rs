@@ -311,9 +311,17 @@ fn remote_transport(sys: &Path) -> Option<String> {
 
 const SLAB_MAGIC: &[u8] = b"STRMSLAB";
 
+/// The first megabyte, read whole: every signature worth naming lives in it.
 const HEAD: u64 = 1 << 20;
+/// The last megabyte: a backup GPT, and the mdraid superblocks that sit at the
+/// end of a member rather than the start.
 const TAIL: u64 = 1 << 20;
 const SAMPLE: u64 = 64 << 10;
+/// Between the two, a grain over the whole drive — fine near the front, where
+/// anything that has ever been used puts something, and coarse after that.
+const NEAR: u64 = 1 << 20;
+const NEAR_UNTIL: u64 = 64 << 20;
+const FAR: u64 = 1 << 30;
 
 /// What was read off a drive. Enough to name what is on it, and — far more
 /// importantly — enough to be sure nothing is.
@@ -345,10 +353,17 @@ impl Sniff {
 
 /// Read the drive, read-only, at the offsets that matter.
 ///
-/// The head names almost everything. The tail catches a backup GPT and the
-/// mdraid superblocks that live at the end. The three samples from the middle
-/// are what stop a disk whose first megabyte was once `dd`'d to zero from
-/// reading as empty.
+/// The head names almost everything and the tail catches what hides at the
+/// end. What is read in between is what stops a drive whose first megabyte was
+/// once `dd`'d to zero from reading as empty — 64 KiB every megabyte through
+/// the first 64 MiB, then 64 KiB every gigabyte to the end. On a 2 TB disk
+/// that is around two thousand reads and 130 MiB, which is seconds; reading
+/// all of it is hours, in an initramfs, on every boot.
+///
+/// It is a sample and not a proof, and the design is built so that it does not
+/// have to be a proof: a drive that has ever been used carries a signature the
+/// head names, and a drive that is only *probably* empty is still `Foreign` on
+/// the strength of a single byte found anywhere in the grain.
 fn sniff(path: &Path) -> std::io::Result<Sniff> {
     let mut f = fs::File::open(path)?;
     let len = f.seek(SeekFrom::End(0))?;
@@ -359,14 +374,14 @@ fn sniff(path: &Path) -> std::io::Result<Sniff> {
     }
 
     let mut rest = Vec::new();
-    if len > HEAD + TAIL {
-        rest.push((len - TAIL, region(&mut f, len - TAIL, TAIL)?));
+    let last = len.saturating_sub(TAIL);
+    let mut off = HEAD;
+    while off + SAMPLE <= last {
+        rest.push((off, region(&mut f, off, SAMPLE)?));
+        off += if off < NEAR_UNTIL { NEAR } else { FAR };
     }
-    for quarter in 1..=3u64 {
-        let off = (len / 4) * quarter;
-        if off >= HEAD && off + SAMPLE <= len {
-            rest.push((off, region(&mut f, off, SAMPLE)?));
-        }
+    if len > HEAD + TAIL {
+        rest.push((last, region(&mut f, last, TAIL)?));
     }
 
     Ok(Sniff { head, rest })
@@ -603,26 +618,37 @@ mod tests {
         assert!(matches!(s.intent(), crate::survey::Intent::NothingToTake { .. }));
     }
 
+    /// A drive is blank when it is zero, and one stray byte anywhere in the
+    /// grain is enough to say it is not. 4 MiB in is where this was caught on
+    /// a real 8 GB disk: a sparser sample read it as empty, which is the one
+    /// mistake this whole file exists to avoid.
     #[test]
     fn a_zeroed_drive_is_blank_and_a_dirtied_one_is_not() {
+        let size = 512 << 20;
         let fake = FakeMachine::new();
-        fake.drive("sda", 8 << 20, false, &[]);
-        fake.drive("sdb", 8 << 20, false, &[]);
-        // One stray byte three quarters of the way in — past the head, past
-        // anything a signature check looks at.
-        let dev = fake.root.path().join("dev/sdb");
-        let mut f = fs::OpenOptions::new().write(true).open(&dev).unwrap();
-        f.seek(SeekFrom::Start(6 << 20)).unwrap();
-        f.write_all(&[0x42]).unwrap();
-        drop(f);
+        fake.drive("sda", size, false, &[]);
+        for (name, at) in [
+            ("sdb", 4 << 20),
+            ("sdc", 63 << 20),
+            ("sdd", size - (2 << 20)),
+        ] {
+            fake.drive(name, size, false, &[]);
+            let mut f =
+                fs::OpenOptions::new().write(true).open(fake.root.path().join("dev").join(name)).unwrap();
+            f.seek(SeekFrom::Start(at)).unwrap();
+            f.write_all(&[0x42]).unwrap();
+        }
 
         let s = survey(&fake.machine()).unwrap();
-        assert_eq!(s.drives[0].verdict, Verdict::Blank);
-        assert!(
-            matches!(&s.drives[1].verdict, Verdict::Foreign { what } if what.contains("unrecognised")),
-            "a drive with something on it past the first megabyte is not blank: {:?}",
-            s.drives[1].verdict
-        );
+        assert_eq!(s.drives[0].verdict, Verdict::Blank, "a zeroed drive is blank");
+        for d in &s.drives[1..] {
+            assert!(
+                matches!(&d.verdict, Verdict::Foreign { what } if what.contains("unrecognised")),
+                "{} has something on it and is not blank: {:?}",
+                d.path,
+                d.verdict
+            );
+        }
     }
 
     /// A node booting off the disk it assimilated onto. The slab is in a
