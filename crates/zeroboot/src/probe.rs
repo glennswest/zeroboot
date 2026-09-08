@@ -386,9 +386,10 @@ fn sniff(path: &Path) -> std::io::Result<Sniff> {
 ///
 /// The first 64 MiB is read whole — one sequential read, and the region where
 /// anything that has ever been done to a drive leaves a trace. After that,
-/// 64 KiB every gigabyte: on a 2 TB disk that is two thousand reads and about
-/// twenty seconds, against hours to read all of it. It is a sample and not a
-/// proof, which is why it is the *last* check and not the only one.
+/// 64 KiB every gigabyte: on a 2 TB drive that is two thousand reads, instant
+/// on an SSD and tens of seconds on a spinning disk, against hours to read all
+/// of it. It is a sample and not a proof, which is why it is the *last* check
+/// and not the only one.
 fn first_nonzero(path: &Path) -> std::io::Result<Option<u64>> {
     let mut f = fs::File::open(path)?;
     let len = f.seek(SeekFrom::End(0))?;

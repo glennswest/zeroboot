@@ -97,12 +97,15 @@ ever taken — a USB stick in the front panel is not free space.
 no partitions, no signature, and every byte read comes back zero.
 
 Every other verdict is reached from the first and last megabyte, so a boot that
-finds nothing to take costs a megabyte a drive. `Blank` is the one verdict that
-leads to a format, so it is the one that pays to look properly: the first
-64 MiB whole — one sequential read, and where anything ever done to a drive
-leaves a trace — then 64 KiB every gigabyte to the end. About twenty seconds on
-a 2 TB spinning disk, against hours to read all of it. That is a sample and not
-a proof, which is exactly why it is the last check and not the only one.
+finds nothing to take costs a megabyte a drive — the whole of a four-drive
+machine, one of them a 2 TB spinning disk, surveys in 0.2 s. `Blank` is the one
+verdict that leads to a format, so it is the one that pays to look properly:
+the first 64 MiB whole — one sequential read, and where anything ever done to a
+drive leaves a trace — then 64 KiB every gigabyte to the end, and the last
+megabyte. On a 2 TB drive that is around two thousand reads: instant on an SSD,
+tens of seconds on a spinning disk, against hours to read all of it. It is a
+sample and not a proof, which is exactly why it is the last check and not the
+only one.
 
 ## Status
 

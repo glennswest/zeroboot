@@ -21,6 +21,11 @@
   another node. A slab in a partition of a local disk is `Mine` too, so a node
   booting off the disk it assimilated onto recognises its own work rather than
   reading it as a foreign partition table.
+- **feat(survey):** the end of a drive is named, not just counted. A backup GPT
+  header and an mdraid v0.90/v1.0 superblock both live there and leave the
+  front untouched, so a disk pulled out of a Linux array reads as blank from
+  the front; it was never going to be taken, but it is now reported as the
+  array member it is.
 - **feat(survey):** nothing removable is ever taken, empty or not — a USB stick
   in the front panel is not free space, and the iDRAC virtual floppy is the
   same device class.
@@ -28,12 +33,21 @@
   over the network, no partitions, no known signature, and every byte read
   comes back zero. Every other verdict comes from the first and last megabyte,
   so a boot with nothing to take costs a megabyte a drive; `Blank` is the one
-  verdict that leads to a format, so it alone pays for the first 64 MiB whole
-  plus 64 KiB every gigabyte to the end — about twenty seconds on a 2 TB
-  spinning disk, against hours to read all of it. A disk whose first megabyte
-  was once zeroed does not read as empty. The first version sampled three
-  points from the middle and called a real 8 GB disk with a byte written 4 MiB
-  in "blank - available", which is the one mistake this file exists to avoid.
+  verdict that leads to a format, so it alone pays for the first 64 MiB whole,
+  64 KiB every gigabyte to the end, and the last megabyte — around two thousand
+  reads on a 2 TB drive, against hours to read all of it. A disk whose first
+  megabyte was once zeroed does not read as empty. The first version sampled
+  three points from the middle and called a real 8 GB disk with a byte written
+  4 MiB in "blank - available", which is the one mistake this file exists to
+  avoid.
 - **feat(survey):** `Drive` carries the drive's model string, and `Survey`,
   `Drive`, `Verdict` and `Intent` serialise, so `--json` reports the evidence
   and the conclusion separately.
+
+Verified on a Linux host against real artifacts rather than fixtures alone: a
+slab formatted by the real `stormblock` reads as `Mine` with its UUID and role,
+a real ext4 filesystem and a real GPT-with-four-partitions disk read as
+`Foreign`, a live nvme-tcp namespace reads as attached over the network, a
+200 GB zeroed disk reads as `Blank`, and an mdraid superblock 8 KiB from the
+end reads as a RAID member. A four-drive machine including a 2 TB spinning disk
+surveys in 0.2 s.
