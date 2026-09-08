@@ -173,7 +173,7 @@ fn judge(
 
     // Where it is attached decides whose it is, before what is on it decides
     // what it is.
-    let remote = remote_transport(sys, name);
+    let remote = remote_transport(sys);
 
     // A disk zeroboot itself laid down carries a GPT with the slab in a
     // partition, so the slab is looked for on the partitions as well as on the
@@ -284,7 +284,7 @@ fn partitions(sys: &Path, name: &str) -> Vec<String> {
 /// How the drive got here, when it did not get here by being plugged in.
 ///
 /// `None` means local — this chassis, this node, nobody else's reach.
-fn remote_transport(sys: &Path, name: &str) -> Option<String> {
+fn remote_transport(sys: &Path) -> Option<String> {
     // NVMe states it outright.
     if let Some(t) = read_trimmed(sys.join("device/transport")).filter(|t| !t.is_empty()) {
         if t != "pcie" {
