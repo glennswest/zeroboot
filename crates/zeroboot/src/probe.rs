@@ -682,7 +682,16 @@ mod tests {
                 dev: self.root.path().join("dev"),
                 stormblock: None,
                 only: Vec::new(),
+                identity: None,
             }
+        }
+
+        /// What the firmware says this machine is.
+        fn identity(&self, serial: &str) -> &Self {
+            let p = self.root.path().join("sys/class/dmi/id");
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("product_serial"), format!("{serial}\n")).unwrap();
+            self
         }
     }
 
