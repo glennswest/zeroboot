@@ -162,5 +162,4 @@ boot volume (`stormblock.volume=boot-cp-01`), and there is no way to list the
 volumes inside a slab without attaching it over ublk — `stormblock slab list`
 gives the uuid, role, tier and slot counts and stops there. So zeroboot can say
 a disk carries a bootloader and that its command line points at the slab on the
-same disk, and cannot yet say the slab holds the volume it asks for. Filed on
-stormblock; until it lands, `boot_volume` is reported and not verified.
+same disk, and cannot yet say the slab holds the volume it asks for. Filed as stormblock#108; until it lands, `boot_volume` is reported and not verified.

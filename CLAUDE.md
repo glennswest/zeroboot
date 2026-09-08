@@ -52,8 +52,7 @@ destructive is opt-in and named.
   the uuid, role, tier and slot counts; there is no `volume list` that reads a
   slab from a file without attaching it over ublk. So zeroboot can check that a
   disk carries a bootloader and that its cmdline points at the slab on the same
-  disk, but not that the slab holds the boot volume the cmdline names. Filed on
-  stormblock.
+  disk, but not that the slab holds the boot volume the cmdline names. Filed as stormblock#108.
 - **Ownership is claimed in the ESP**, so it covers the boot drive. A data slab
   with no ESP still falls back to "local, therefore this node's". That is the
   right scope: the identity that matters is the hostname in `stormcos-state`,
