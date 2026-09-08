@@ -104,7 +104,74 @@ evidence of emptiness.
 
 Both carry the same zeroboot; only how they arrive differs.
 
-## Looking at a machine
+## How it runs
+
+zeroboot is a step in the boot, not something anybody types. The initramfs
+carries the binary at `/sbin/zeroboot` and `/init` calls it before the
+local-slab probe:
+
+```sh
+if [ -x /sbin/zeroboot ]; then
+    eval "$(/sbin/zeroboot boot)"
+    case "$ZB_ACTION" in
+        boot-local)    SLAB="$ZB_SLAB" ;;
+        ask-appliance) SLAB="" ;;
+    esac
+fi
+```
+
+The consumer is busybox `sh` with no `jq`, so the contract is shell-shaped:
+
+| | |
+|---|---|
+| stdout | `KEY='value'`, single-quoted, and *nothing else* |
+| exit 0 | `ZB_ACTION=boot-local` + `ZB_SLAB`, `ZB_SLAB_ID`, `ZB_VOLUME`, `ZB_DRIVE` |
+| exit 2 | `ZB_ACTION=ask-appliance` + `ZB_REASON` |
+| exit 1 | `ZB_ACTION=error` + `ZB_REASON` |
+| stderr and `/dev/kmsg` | progress, for the boot log |
+
+Every diagnostic goes to stderr because stdout is a shell's input: a stray log
+line there is a line PID 1 executes. A test runs the real binary and evaluates
+its output in `/bin/sh` to keep it that way.
+
+`zeroboot boot` also **claims** the drive it decides to boot, when nobody has
+claimed it yet. There is no operator in a boot to do it, and a claim that is
+never written leaves the ownership check with nothing to check.
+
+`scripts/stormcos-initramfs.sh` installs the binary, and refuses a dynamically
+linked one — the initramfs is busybox with no loader, so a glibc build does not
+fail at build time, it fails at boot as "not found" on a file that is plainly
+there:
+
+```
+./scripts/stormcos-initramfs.sh <src> <kver> <modules-dir> <out> target/x86_64-unknown-linux-musl/release/zeroboot
+```
+
+It does **not** patch `/init` — that was retired in `81b7922` after the anchors
+went stale and crashed the build. `/init` calling the hook is stormblock#109.
+
+## What the rest of the machine gets
+
+`zeroboot boot` writes the drive inventory to `--report`
+(`/run/zeroboot/survey.json` by default) before it decides anything, so
+whatever comes after has the pre-boot view — stormdrive especially, since
+zeroboot sees the drives before anything else on the machine is running.
+
+It is keyed on identity rather than device paths, which are not identities on
+this hardware:
+
+```json
+{ "path": "/dev/sda", "model": "WDC WD20EFAX-68F",
+  "wwid": "naa.5000c500a1b2c3d4", "serial": "WD-WCC4N1234567",
+  "table": { "disk_guid": "f1d877df-…",
+             "partitions": [ { "index": 1, "name": "ESP",
+                               "guid": "9a1f3a73-…", "type_guid": "c12a7328-…" } ] } }
+```
+
+## Looking at a machine by hand
+
+`survey` and `claim` are for a person — a machine in front of you, or a
+recovery. Neither runs in the boot.
 
 ```
 zeroboot survey

@@ -28,11 +28,19 @@ location.
 |---|---|
 | `survey.rs` | the judgement: what is on each drive, whose it is, what follows. Pure; no I/O. |
 | `probe.rs` | the eyes: `/sys/block`, the bytes on each drive, `stormblock slab list`. Read-only. |
-| `esp.rs` | reading and writing the ESP of a drive zeroboot laid out — loader entry, and the owner record. |
+| `esp.rs` | reading and writing the ESP of a drive zeroboot laid out — loader entry, partition GUIDs, and the owner record. |
 | `bootimage.rs` | building a bootable disk image, in pure Rust. Also the writer whose output `esp.rs` reads back. |
 
 `survey` decides nothing about how to boot; it says what is there. Everything
 destructive is opt-in and named.
+
+**zeroboot is a step in the boot, not a command anyone runs.** `zeroboot boot`
+is the entry point: the initramfs carries the binary at `/sbin/zeroboot` and
+`/init` calls it, evaluating `KEY='value'` off stdout and branching on the exit
+code. That makes stdout an interface with a shell on the other end — every
+diagnostic goes to stderr, every value is single-quoted, and
+`tests/boot_contract.rs` runs the real binary through `/bin/sh` to keep it so.
+`survey` and `claim` are for a person with a machine in front of them.
 
 ## Work plan
 
@@ -44,6 +52,10 @@ destructive is opt-in and named.
 - [x] whose slab is it — a claim in the ESP, checked against the SMBIOS service
       tag, so a disk moved between chassis does not change hands silently
       (issue #2 comment)
+- [x] `zeroboot boot` — the entry point `/init` calls, and the binary actually
+      in the initramfs
+- [x] a drive inventory for stormdrive, keyed on wwid/serial/GPT GUIDs
+- [ ] `/init` calling the hook — stormblock#109
 - [ ] format and volume creation — assimilation proper (#2)
 
 ## Known limits, deliberately
@@ -53,6 +65,9 @@ destructive is opt-in and named.
   slab from a file without attaching it over ublk. So zeroboot can check that a
   disk carries a bootloader and that its cmdline points at the slab on the same
   disk, but not that the slab holds the boot volume the cmdline names. Filed as stormblock#108.
+- **`/init` does not call zeroboot yet** (stormblock#109). Until it does, the
+  binary ships in the initramfs and nothing invokes it, and the boot falls back
+  to stormblock's own slab probe — which is the behaviour that exists today.
 - **Ownership is claimed in the ESP**, so it covers the boot drive. A data slab
   with no ESP still falls back to "local, therefore this node's". That is the
   right scope: the identity that matters is the hostname in `stormcos-state`,

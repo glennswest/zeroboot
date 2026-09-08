@@ -3,6 +3,45 @@
 ## [Unreleased]
 
 ### 2026-09-08
+- **feat(boot): zeroboot is now part of the boot, which it was not.** The
+  binary was never in the initramfs and `/init` never called it, so on a real
+  machine none of the judgement ran — `survey` and `claim` existed only for
+  somebody typing them, and the boot was decided entirely by stormblock's own
+  slab probe. `zeroboot boot` is the entry point `/init` calls: `KEY='value'`
+  on stdout for a shell to `eval`, and an exit code (0 boot-local, 2
+  ask-appliance, 1 error) so it can branch without parsing.
+- **feat(initramfs):** `stormcos-initramfs.sh` installs the binary at
+  `/sbin/zeroboot`, and refuses a dynamically linked one — that initramfs is
+  busybox with no loader, so a glibc build does not fail at build time, it
+  fails at boot as "not found" on a file that is plainly there. Verified: the
+  built initramfs carries a 1.5 MB static musl binary that runs. It still does
+  not patch `/init`; `/init` calling the hook is stormblock#109.
+- **fix(boot):** every diagnostic goes to stderr, ANSI off. A fatfs BPB warning
+  about an unrelated disk's ESP was landing on stdout, escapes and all — and
+  stdout is what `init` evaluates, so that is a line PID 1 tries to run.
+- **fix(boot):** values are single-quoted with embedded quotes spliced as
+  `'\''`. A drive model is not hostile input, but it comes off a disk and ends
+  up on the command line of a shell running before anything else on the
+  machine.
+- **feat(boot):** a boot claims the drive it boots, when nobody has claimed it
+  yet. There is no operator in a boot to run `zeroboot claim`, so without this
+  the claim was never written on a real machine and the ownership check had
+  nothing to check.
+- **feat(report):** `zeroboot boot` writes the drive inventory to `--report`
+  (`/run/zeroboot/survey.json`) before deciding anything, for stormdrive and
+  anything else that comes after — zeroboot sees the drives before anything
+  else on the machine is running.
+- **feat(survey):** drives carry identity, not just a path: `wwid`, `serial`,
+  the GPT `disk_guid`, and every partition's own GUID, name, type GUID and
+  extent. A device path is not an identity on this hardware — `/dev/sda` is
+  sometimes a 2 TB disk and sometimes an iDRAC virtual floppy — and stormdrive's
+  first line is identity that survives reboots and path changes.
+- **test:** `tests/boot_contract.rs` runs the real binary: every stdout line is
+  a `KEY='value'`, `/bin/sh` evaluates it and runs nothing, the exit codes are
+  0 and 2, a reason full of punctuation comes back out of the shell byte for
+  byte, the report carries the GUIDs, and a boot claims the drive it boots.
+
+### 2026-09-08
 - **feat(esp):** `esp` — read back the ESP of a drive `bootimage` laid out: the
   loader entry, the kernel and initramfs it names, the bootloader, and the
   command line. `gpt` and `fatfs` were already dependencies for writing these
