@@ -116,17 +116,44 @@ pub struct Drive {
 }
 
 impl Drive {
-    /// Whether this drive has everything it takes to boot itself: a
-    /// bootloader, a loader entry, and the kernel and initramfs that entry
-    /// names.
+    /// Whether this drive can start the node.
+    ///
+    /// Two layouts reach this, and only one of them boots itself from
+    /// firmware:
+    ///
+    /// - **A disk zeroboot laid out** (`boot-image`, or the ISO) has an ESP
+    ///   carrying a bootloader, a kernel, an initramfs and a loader entry. It
+    ///   claims to boot on its own, and the claim is checkable: if the kernel
+    ///   the entry names is not there, the drive does not boot, and saying so
+    ///   is the whole point of looking.
+    /// - **A disk assimilated by the flow-over** has no ESP at all. stormblock
+    ///   lays a data slab and a system slab and no boot partition, because the
+    ///   node netboots its kernel and only its *slab* is local. There is
+    ///   nothing here to check and nothing missing.
+    ///
+    /// So the absence of an ESP is not evidence of anything, and treating it
+    /// as a defect sends a node that assimilated perfectly well back to the
+    /// appliance on every boot afterwards — which is the failure this whole
+    /// distinction exists to avoid, pointed the other way.
+    ///
+    /// What is left unverified is whether the system slab actually holds the
+    /// boot volume. That needs listing the volumes inside a slab, which cannot
+    /// be done offline (stormblock#108). Until it can, a system slab is taken
+    /// at its word and a data slab is not: a data slab is not supposed to boot.
     pub fn boots(&self) -> bool {
-        self.esp.as_ref().is_some_and(|e| e.boot.is_some())
+        match &self.esp {
+            Some(e) => e.boot.is_some(),
+            None => self.verdict.slab_role() == Some("system"),
+        }
     }
 
     /// Why it does not, in the drive's own words.
     fn why_not(&self) -> String {
         match &self.esp {
-            None => "no EFI System Partition on it".into(),
+            None => match self.verdict.slab_role() {
+                Some(role) => format!("a {role} slab, which does not boot a node"),
+                None => "nothing on it that boots".into(),
+            },
             Some(e) if e.missing.is_empty() => "nothing bootable on its ESP".into(),
             Some(e) => e.missing.join("; "),
         }
@@ -292,6 +319,19 @@ mod tests {
         d
     }
 
+    trait BrokenEsp {
+        fn with_broken_esp(self, missing: &str) -> Drive;
+    }
+    impl BrokenEsp for Drive {
+        /// An ESP that is there and does not have what it names — the one case
+        /// where a drive positively says it cannot boot.
+        fn with_broken_esp(mut self, missing: &str) -> Drive {
+            self.esp =
+                Some(esp::Esp { boot: None, claim: None, missing: vec![missing.to_string()] });
+            self
+        }
+    }
+
     #[test]
     fn only_a_blank_drive_may_be_taken() {
         assert!(Verdict::Blank.is_available());
@@ -418,22 +458,53 @@ mod tests {
     #[test]
     fn a_slab_that_boots_nothing_does_not_settle_the_boot() {
         let s = Survey {
-            drives: vec![without_an_esp(drive("/dev/sda", 1 << 40, true, Verdict::Mine {
+            drives: vec![drive("/dev/sda", 1 << 40, true, Verdict::Mine {
                 slab_id: "7661cf8b".into(),
                 role: "system".into(),
-                slab: "/dev/sda".into(),
-            }))],
+                slab: "/dev/sda2".into(),
+            })
+            .with_broken_esp("kernel /vmlinuz named by the loader entry is not on the ESP")],
         };
         match s.intent() {
             Intent::MineButNoneBoots { because } => {
                 assert_eq!(because.len(), 1);
                 assert!(because[0].contains("/dev/sda"), "{because:?}");
-                assert!(because[0].contains("no EFI System Partition"), "{because:?}");
+                assert!(because[0].contains("vmlinuz"), "{because:?}");
             }
             other => panic!("expected MineButNoneBoots, got {other:?}"),
         }
         // And it is still not a drive to take: it is already ours.
         assert!(s.available().is_empty());
+    }
+
+    /// A drive the flow-over assimilated: two slabs, no ESP, because the node
+    /// netboots its kernel and only the slab is local. There is nothing here
+    /// to check and nothing missing — and calling that "does not boot" would
+    /// send a node that assimilated perfectly well back to the appliance on
+    /// every boot for the rest of its life.
+    #[test]
+    fn a_flow_over_drive_has_no_esp_and_boots_anyway() {
+        let s = Survey {
+            drives: vec![
+                without_an_esp(drive("/dev/sda", 4 << 40, true, Verdict::Mine {
+                    slab_id: "data-slab".into(),
+                    role: "data".into(),
+                    slab: "/dev/sda1".into(),
+                })),
+                without_an_esp(drive("/dev/sda", 4 << 40, true, Verdict::Mine {
+                    slab_id: "system-slab".into(),
+                    role: "system".into(),
+                    slab: "/dev/sda2".into(),
+                })),
+            ],
+        };
+        match s.intent() {
+            Intent::AlreadyMine { slab, slab_id, .. } => {
+                assert_eq!(slab_id, "system-slab", "the system half is the one that boots");
+                assert_eq!(slab, "/dev/sda2");
+            }
+            other => panic!("expected AlreadyMine, got {other:?}"),
+        }
     }
 
     /// The case that makes the distinction earn its keep: the system disk died
@@ -457,11 +528,12 @@ mod tests {
     fn the_drive_that_boots_is_the_one_chosen() {
         let s = Survey {
             drives: vec![
-                without_an_esp(drive("/dev/sda", 4 << 40, true, Verdict::Mine {
+                drive("/dev/sda", 4 << 40, true, Verdict::Mine {
                     slab_id: "data-slab".into(),
                     role: "system".into(),
                     slab: "/dev/sda".into(),
-                })),
+                })
+                .with_broken_esp("no /EFI/BOOT/BOOTX64.EFI"),
                 drive("/dev/sdb", 1 << 40, false, Verdict::Mine {
                     slab_id: "boot-slab".into(),
                     role: "data".into(),
