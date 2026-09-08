@@ -22,6 +22,7 @@
 //! Boot-artifact assembly lives here too, reusable by stormcos_builder and
 //! other tooling; the binary is a thin CLI over it.
 
+pub mod esp;
 pub mod probe;
 pub mod survey;
 
