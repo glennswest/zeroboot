@@ -126,7 +126,7 @@ The consumer is busybox `sh` with no `jq`, so the contract is shell-shaped:
 |---|---|
 | stdout | `KEY='value'`, single-quoted, and *nothing else* |
 | exit 0 | `ZB_ACTION=boot-local` + `ZB_SLAB`, `ZB_SLAB_ID`, `ZB_VOLUME`, `ZB_DRIVE` |
-| exit 2 | `ZB_ACTION=ask-appliance` + `ZB_REASON` |
+| exit 2 | `ZB_ACTION=ask-appliance` + `ZB_REASON`, and `ZB_TAKEABLE` when a drive here is free |
 | exit 1 | `ZB_ACTION=error` + `ZB_REASON` |
 | stderr and `/dev/kmsg` | progress, for the boot log |
 
@@ -134,7 +134,40 @@ Every diagnostic goes to stderr because stdout is a shell's input: a stray log
 line there is a line PID 1 executes. A test runs the real binary and evaluates
 its output in `/bin/sh` to keep it that way.
 
-`zeroboot boot` also **claims** the drive it decides to boot, when nobody has
+## Taking a drive is stormblock's to do
+
+zeroboot does not format anything. `stormblock boot-local --local-disk <drive>`
+already is the assimilation — it lays a data slab and a system slab on the
+drive and migrates the node's extents onto them in the background once root is
+up, one extent per lock cycle so root I/O keeps flowing, with the system half
+finished by the successor because the initramfs process does not outlive
+`switch_root`. The flag is called the zeroboot flow-over.
+
+What was missing is **which drive**, and that is the whole of what zeroboot
+adds. The guard on the other side refuses a drive carrying a data slab —
+that partition holds the node's CA key and its ServiceAccount signing key, and
+nothing can mint them again — and that is the only thing it checks, because it
+assumes an operator who has looked at the drive. A disk with somebody's ext4 on
+it, or the four partitions the R230 actually has, passes it.
+
+So `ZB_TAKEABLE` is only ever a drive judged `Blank`, which is strictly
+stronger, and the guard stays the last word:
+
+```sh
+stormblock boot-local --slab "$SLAB" ${ZB_TAKEABLE:+--local-disk "$ZB_TAKEABLE"}
+```
+
+Nothing is offered when the node already owns a slab. A second assimilation
+while one is owned may be a half-finished install or a disk somebody is about
+to replace, and that is not something to infer.
+
+A drive the flow-over assimilated has **no ESP** — the node netboots its kernel
+and only the slab is local — so it is a `role=system` slab that says this drive
+boots the node, not a loader entry. Which means no claim can be written on one:
+claims live on the ESP, so a flow-over drive falls back to "local, therefore
+this node's". Only a disk zeroboot laid out with `boot-image` carries a claim.
+
+`zeroboot boot` **claims** the drive it decides to boot, when nobody has
 claimed it yet. There is no operator in a boot to do it, and a claim that is
 never written leaves the ownership check with nothing to check.
 

@@ -55,8 +55,13 @@ diagnostic goes to stderr, every value is single-quoted, and
 - [x] `zeroboot boot` — the entry point `/init` calls, and the binary actually
       in the initramfs
 - [x] a drive inventory for stormdrive, keyed on wwid/serial/GPT GUIDs
-- [ ] `/init` calling the hook — stormblock#109
-- [ ] format and volume creation — assimilation proper (#2)
+- [x] name the flow-over target so stormblock can assimilate (#2) — zeroboot
+      does not format; `boot-local --local-disk` already does, and what was
+      missing was which drive
+- [ ] `/init` calling the hook, and passing `--local-disk` — stormblock#109
+- [ ] two drives rather than one: `available()` returns a list and only the
+      first is offered (#2, and the R230 has one drive so it cannot be tried
+      here)
 
 ## Known limits, deliberately
 
@@ -65,6 +70,13 @@ diagnostic goes to stderr, every value is single-quoted, and
   slab from a file without attaching it over ublk. So zeroboot can check that a
   disk carries a bootloader and that its cmdline points at the slab on the same
   disk, but not that the slab holds the boot volume the cmdline names. Filed as stormblock#108.
+- **zeroboot never formats.** `stormblock boot-local --local-disk` lays the
+  data and system slabs and migrates the extents; zeroboot decides which drive
+  is safe to hand it. Reimplementing the format here would duplicate a careful
+  implementation, its identity guard included.
+- **A flow-over drive has no ESP**, so no claim can be written on one and it
+  falls back to "local, therefore this node's". Only a disk laid out by
+  `boot-image` carries a claim.
 - **`/init` does not call zeroboot yet** (stormblock#109). Until it does, the
   binary ships in the initramfs and nothing invokes it, and the boot falls back
   to stormblock's own slab probe — which is the behaviour that exists today.

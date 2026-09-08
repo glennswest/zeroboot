@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### 2026-09-08
+- **fix(survey): a drive with no ESP is not a drive that cannot boot.** The
+  flow-over lays a data slab and a system slab on the local disk and no boot
+  partition — the node netboots its kernel and only the slab is local — so
+  requiring an ESP would have sent a node that assimilated perfectly well back
+  to the appliance on every boot afterwards, which is the failure
+  `MineButNoneBoots` exists to prevent, pointed the other way. An ESP naming a
+  kernel it does not have is positive evidence; no ESP is evidence of nothing,
+  so a `system` slab is taken at its word and a `data` slab is not.
+- **feat(boot): name the flow-over target (#2).** `stormblock boot-local
+  --local-disk` already is the assimilation; zeroboot does not format and
+  should not. What was missing is which drive. `ZB_TAKEABLE` names one, and it
+  is only ever a drive judged `Blank` — the guard on the other side refuses a
+  drive carrying a *data slab*, and has nothing to say about one carrying
+  somebody's ext4 or four partitions from a previous life, which
+  `--local-disk` would format without pausing. Nothing is offered when the node
+  already owns a slab.
 - **feat(boot): zeroboot is now part of the boot, which it was not.** The
   binary was never in the initramfs and `/init` never called it, so on a real
   machine none of the judgement ran — `survey` and `claim` existed only for
