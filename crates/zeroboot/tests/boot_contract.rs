@@ -166,11 +166,22 @@ fn nothing_of_ours_asks_the_appliance() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stdout.contains("ZB_ACTION='ask-appliance'"), "{stdout}");
 
-    let script = format!("{stdout}\nprintf '%s\\n' \"$ZB_REASON\"\n");
+    // The reason is a sentence with spaces, slashes and punctuation in it.
+    // What matters is not which sentence — that is the verdict's business —
+    // but that the shell hands back exactly what zeroboot wrote.
+    let quoted = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ZB_REASON="))
+        .expect("a reason is given");
+    let written = quoted.trim_matches('\'').replace("'\\''", "'");
+    assert!(written.contains(' '), "a reason worth quoting: {written:?}");
+
+    let script = format!("{stdout}\nprintf '%s' \"$ZB_REASON\"\n");
     let sh = Command::new("/bin/sh").arg("-c").arg(&script).output().unwrap();
     assert!(sh.status.success(), "{}", String::from_utf8_lossy(&sh.stderr));
-    assert!(
-        String::from_utf8(sh.stdout).unwrap().contains("GPT"),
+    assert_eq!(
+        String::from_utf8(sh.stdout).unwrap(),
+        written,
         "the reason survives the shell whole"
     );
 }
